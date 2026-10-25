@@ -86,10 +86,20 @@ class RowRejected(Exception):
 def parse_cost_cents(text: str) -> int | None:
     """Dollars as text to integer cents. Blank is None. Anything ambiguous is rejected, never guessed.
 
-    Accepted: 12, 12.5, 12.50, $12.50, 1,234.50, 12.5000. Rejected: 12,50 (a decimal comma looks like a
-    thousands separator), 12.505 (half a cent), -3, N/A, and a cost above ten million dollars.
+    Accepted: 12, 12.5, 12.50, $12.50, 1,234.50, 12.5000, 1 234.50. Rejected: 12,50 (a decimal comma looks like a
+    thousands separator), 12.505 (half a cent), -3, N/A, a cost above ten million dollars, and a cell holding TWO
+    amounts (`$20 $15`, a struck price and a new one: gluing them gave 2015 dollars).
+
+    One shape is not told apart: spaces that group thousands (`1 234.50`) are accepted, so two bare whole amounts with no
+    currency sign and no cents (`12 345`) read as one. Rejecting the grouping would refuse an ordinary price.
     """
-    value = (text or "").strip().replace("$", "").replace(" ", "")
+    text = (text or "").strip()
+    if text.count("$") > 1 or re.search(r"\d *\$ *\d", text):  # an amount, a sign, another amount: two prices
+        raise RowRejected("bad_cost")
+    value = text.replace("$", "")
+    if re.search(r"\d +\d", value) and not re.fullmatch(r" *\d{1,3}( \d{3})+(\.\d+)? *", value):  # digits split by spaces
+        raise RowRejected("bad_cost")
+    value = value.replace(" ", "")
     if value == "":
         return None
     if "," in value:

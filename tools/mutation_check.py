@@ -499,6 +499,9 @@ MUTANTS: list[Mutant] = [
     D("soap: the Retry-After of a throttled answer is not remembered", "soap", "post", "negate the condition", "response.status_code >= 429", REMOTE),
     # F10: a proxy scheme the config accepts needs its dependency (requirements.txt is not Python: the one guard that is a text pair)
     M("requirements: the SOCKS support of requests is not installed", "requirements", "requests[socks]>=2.32,<3", "requests>=2.32,<3", SCRAPE),
+    # F14: a cell holding two amounts is rejected, never glued into one
+    D("mapping: a cell with two dollar signs is read as one amount", "mapping", "parse_cost_cents", "negate the condition", 'text.count("$") > 1', MAP, PAGES),
+    D("mapping: digits split by spaces are glued into one amount", "mapping", "parse_cost_cents", "negate the condition", "and not re.fullmatch", MAP, PAGES),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]

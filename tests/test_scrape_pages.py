@@ -1101,3 +1101,14 @@ def test_a_retry_after_date_in_the_past_is_the_ordinary_backoff():
 
     adapter, waits = scrape_with_wall_clock(limited(formatdate(WALL - 60, usegmt=True)))
     assert codes(records(adapter)) == [] and waits == [0.5, 1.0]
+
+
+def test_a_sale_cell_with_a_struck_price_and_a_new_price_is_a_visible_rejected_row_and_the_others_are_stored():
+    from catalog.models import RejectedRow
+
+    sale = '<del><span class="amount">$20</span></del> <ins><span class="amount">$15</span></ins>'
+    html = f'<html><body><table class="products"><thead>{HEAD4}</thead><tbody>{ROW(1)}{ROW(2, sale)}{ROW(3, "$1,234.50")}</tbody></table></body></html>'
+    run = ingest(get_supplier("sale"), adapter_for(lambda url: (200, {}, html)))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_rejected == 1
+    assert list(RejectedRow.objects.values_list("reason", flat=True)) == ["bad_cost"] and "$20" in RejectedRow.objects.get().raw
+    assert dict(RawPart.objects.values_list("part_number_raw", "cost_cents")) == {"MF-1": 1000, "MF-3": 123450}

@@ -1,5 +1,7 @@
 """Header mapping and cost parsing: what maps, what is refused, and that nothing is guessed."""
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from catalog.ingest.mapping import (
     RowRejected,
@@ -124,3 +126,45 @@ def test_the_first_valid_gtin_wins_and_the_first_filled_description_wins():
     assert (got.gtin, got.description, got.picked) == ("5012345678900", "Oil", {"gtin": "EAN", "description": "Description"})
     junk = map_row({"PartNo": "AB123", "Brand": "Marlow", "Cost": "1", "UPC": "123", "EAN": "999"}, mapping)
     assert junk.gtin == "123"  # nothing valid: the first value is kept so it is flagged invalid, not silently dropped
+
+
+# ---- second output round: a cell holding two amounts is rejected, never glued into one -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$20 $15", "$20$15", "20 $15", "$20 15", "20 15", "$20 $15.50", "$20.50 $15", "$ 20 $ 15", "20  15", "12 50", "$1,200 $999",
+        "$20.00 $15.00", "$1 234 $999",
+    ],
+)
+def test_a_cell_with_a_struck_price_and_a_new_price_is_rejected_not_glued_into_one_amount(text):
+    """`$20` then `$15` used to lose the space and become 2015 dollars, stored as 201500 cents."""
+    with pytest.raises(RowRejected) as err:
+        parse_cost_cents(text)
+    assert err.value.reason == "bad_cost"
+
+
+@pytest.mark.parametrize(
+    "text, cents",
+    [
+        ("$20", 2000), ("20", 2000), ("20.00", 2000), ("$ 20", 2000), ("$20.00", 2000), (" $ 20.00 ", 2000), ("$1,234", 123400), ("$1,234.56", 123456),
+        ("1 234.50", 123450), ("12 345", 1234500), ("$1 234 567.89", 123456789), ("12 .50", 1250), ("$0.05", 5), ("1,000,000", 100_000_000),
+    ],
+)
+def test_every_ordinary_price_shape_still_parses_as_it_did(text, cents):
+    assert parse_cost_cents(text) == cents
+
+
+@given(st.integers(0, 9_999_999_99), st.integers(0, 9_999_999_99), st.sampled_from(["$", ""]), st.sampled_from(["$", ""]), st.sampled_from([" ", "  ", " $ "]))
+@settings(max_examples=300, deadline=None)
+def test_two_amounts_in_any_shape_are_never_one_price_and_one_amount_in_any_shape_is_its_price(a, b, sign_a, sign_b, glue):
+    def shown(cents, sign, thousands):
+        whole, frac = divmod(cents, 100)
+        body = f"{whole:,}" if thousands else str(whole)
+        return f"{sign}{body}.{frac:02d}"  # a whole amount with no cents and no sign is the one case that is not told apart, see docs/feeds.md
+
+    for thousands in (False, True):
+        assert parse_cost_cents(shown(a, sign_a, thousands)) == a
+        with pytest.raises(RowRejected):
+            parse_cost_cents(f"{shown(a, sign_a, thousands)}{glue}{shown(b, sign_b, thousands)}")
