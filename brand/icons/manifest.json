@@ -1,0 +1,108 @@
+{
+ "master": "master.svg",
+ "bg": "#0B5563",
+ "fg": "#FFFFFF",
+ "name": "Camlobe",
+ "assets": {
+  "android-foreground.png": {
+   "bytes": 6846,
+   "width": 432,
+   "height": 432
+  },
+  "android-background.png": {
+   "bytes": 1296,
+   "width": 432,
+   "height": 432
+  },
+  "android-monochrome.png": {
+   "bytes": 6490,
+   "width": 432,
+   "height": 432
+  },
+  "play-store-icon.png": {
+   "bytes": 9329,
+   "width": 512,
+   "height": 512
+  },
+  "apple-app-icon-1024.png": {
+   "bytes": 20403,
+   "width": 1024,
+   "height": 1024
+  },
+  "apple-touch-icon.png": {
+   "bytes": 3144,
+   "width": 180,
+   "height": 180
+  },
+  "favicon-16.png": {
+   "bytes": 342,
+   "width": 16,
+   "height": 16
+  },
+  "favicon-32.png": {
+   "bytes": 627,
+   "width": 32,
+   "height": 32
+  },
+  "favicon-48.png": {
+   "bytes": 900,
+   "width": 48,
+   "height": 48
+  },
+  "pwa-192.png": {
+   "bytes": 2872,
+   "width": 192,
+   "height": 192
+  },
+  "pwa-512.png": {
+   "bytes": 8301,
+   "width": 512,
+   "height": 512
+  },
+  "pwa-maskable-512.png": {
+   "bytes": 7471,
+   "width": 512,
+   "height": 512
+  },
+  "win-44.png": {
+   "bytes": 703,
+   "width": 44,
+   "height": 44
+  },
+  "win-71.png": {
+   "bytes": 1054,
+   "width": 71,
+   "height": 71
+  },
+  "win-150.png": {
+   "bytes": 2226,
+   "width": 150,
+   "height": 150
+  },
+  "win-310x150.png": {
+   "bytes": 2431,
+   "width": 310,
+   "height": 150
+  },
+  "win-310.png": {
+   "bytes": 4780,
+   "width": 310,
+   "height": 310
+  },
+  "chrome-store-icon-128.png": {
+   "bytes": 1561,
+   "width": 128,
+   "height": 128
+  },
+  "github-social-preview.png": {
+   "bytes": 14217,
+   "width": 1280,
+   "height": 640
+  },
+  "og-image.png": {
+   "bytes": 13920,
+   "width": 1200,
+   "height": 630
+  }
+ }
+}

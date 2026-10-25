@@ -30,6 +30,8 @@ RULE_TABLE = [
     ("AB.12/34_56", "", "AB123456", ("R3",)),
     ("ÀBC-123", "", "ABC123", ("R1", "R3")),  # A grave
     ("１２３４５", "", "12345", ("R1",)),  # full width digits
+    ("MF-MF-H4123A", "MARLOW", "H4123A", ("R3", "R4")),  # a prefix repeated by a careless export tool
+    ("KB KST 0440011187", "KESTREL", "0440011187", ("R3", "R4")),
     ("MF-12", "MARLOW", "MF12", ("R3",)),  # the prefix stays when fewer than 3 characters remain
     ("MF-ABC", "MARLOW", "MFABC", ("R3",)),  # ... or when what remains has no digit
     ("0440011187", "", "440011187", ("R5",)),  # unbranded: the zero rule applies, which is why no brand means review
@@ -106,6 +108,16 @@ def test_gtin(raw, expected, flag):
     assert normalize_gtin(raw) == (expected, flag)
 
 
+@pytest.mark.parametrize("length", [9, 10, 11, 15, 16])
+def test_gtin_of_a_length_that_is_not_a_gtin_is_dropped_even_with_a_valid_check_digit(length):
+    body = "5" + "0123456789"[: length - 2]
+    body = (body + "7" * length)[: length - 1]
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(body)))
+    digits = body + str((10 - total % 10) % 10)
+    assert len(digits) == length
+    assert normalize_gtin(digits) == ("", "gtin_invalid")
+
+
 def test_version_is_exposed():
     assert isinstance(NORMALIZER_VERSION, int) and NORMALIZER_VERSION >= 1
 
@@ -140,9 +152,10 @@ def test_separators_and_case_never_change_the_result(raw, brand, data):
 @settings(max_examples=300, deadline=None)
 def test_a_brand_prefix_never_changes_the_result(raw, brand, data):
     assume(any(c.isdigit() for c in raw))
-    prefix = data.draw(st.sampled_from(BRAND_PREFIXES[brand]))
-    sep = data.draw(SEPARATORS)
-    assert normalize_part_number(prefix + sep + raw, brand).value == normalize_part_number(raw, brand).value
+    clothed = raw
+    for _ in range(data.draw(st.integers(1, 3))):  # one prefix, or the same export tool applying it again
+        clothed = data.draw(st.sampled_from(BRAND_PREFIXES[brand])) + data.draw(SEPARATORS) + clothed
+    assert normalize_part_number(clothed, brand).value == normalize_part_number(raw, brand).value
 
 
 @given(st.text(max_size=40), BRANDS)

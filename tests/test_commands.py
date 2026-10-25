@@ -137,3 +137,13 @@ def test_fitment_and_index_commands(tmp_path, capsys, meili):
     bad.write_text("brand,part_number\r\nMarlow,H1001A\r\n", encoding="utf-8")
     with pytest.raises(CommandError, match="failed"):
         call_command("load_fitment", str(bad))
+
+
+def test_run_demo_runs_everything_and_refuses_a_database_that_is_not_empty(tmp_path, capsys):
+    call_command("run_demo", "--out", str(tmp_path / "d"), "--size", "400", "--no-search")
+    out = capsys.readouterr().out
+    assert "SUMMARY" in out and "(source unchanged)" in out and "SchemaDriftError" in out
+    assert "normalized 0, matched or created 0, refreshed 0, queued for review 0" in out
+    assert "normalized rows still pending match: 0" in out
+    with pytest.raises(CommandError, match="already holds rows"):
+        call_command("run_demo", "--out", str(tmp_path / "d2"), "--size", "50", "--no-search")

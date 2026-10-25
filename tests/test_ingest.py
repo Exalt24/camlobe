@@ -220,6 +220,42 @@ def test_the_adapter_reports_a_gap_and_the_run_is_partial_and_resumable(tmp_path
     assert again.notes["resumed_from"] == 10 and again.rows_written == 10 and again.rows_unchanged == 10
 
 
+def test_rereading_rows_after_a_gap_does_not_store_a_row_twice():
+    """The checkpoint stops at a gap, so the rows after it are read again. Their idempotency keys stop them landing twice,
+    even when the part has two versions after the gap and the latest stored one is not the row being re-read."""
+    s = get_supplier()
+
+    class AfterGap:
+        source_ref = "api"
+
+        def __init__(self, fixed):
+            self.fixed = fixed
+
+        def fingerprint(self):
+            return ""
+
+        def notes(self):
+            return {}
+
+        def records(self, start_after=0):
+            for i in range(1, 31):
+                if i <= start_after:
+                    continue
+                if 11 <= i <= 20 and not self.fixed:
+                    if i == 11:
+                        yield SourceGap(11, 20, "page 2 failed")
+                    continue
+                cost = {25: "6.00", 28: "7.00"}.get(i, "1.00")
+                part = "AB9999" if i in (25, 28) else f"AB{i:04d}"
+                yield SourceRecord(i, {"PartNo": part, "Mfr": "Marlow", "Cost": cost})
+
+    ingest(s, AfterGap(fixed=False), batch_size=5)
+    again = ingest(s, AfterGap(fixed=True), batch_size=5)
+    assert again.status == PipelineRun.Status.SUCCEEDED
+    assert RawPart.objects.filter(part_number_raw="AB9999").count() == 2  # one row per version, not four
+    assert list(RawPart.objects.filter(part_number_raw="AB9999").order_by("id").values_list("cost_cents", flat=True)) == [600, 700]
+
+
 def test_a_live_source_with_no_fingerprint_is_read_again_each_time():
     s = get_supplier()
 
@@ -323,6 +359,8 @@ def test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_f
     assert 100 <= cp.position < 6000 and not cp.completed, "the process finished before it was killed"
     assert stored == cp.position  # every row up to the checkpoint is stored, none beyond it
     assert PipelineRun.objects.filter(status="running").count() == 1  # the dead process never closed its run
+    dead = PipelineRun.objects.get(status="running")
+    assert (dead.rows_read, dead.rows_written) == (cp.position, cp.position)  # its counts were saved with each batch
     resumed = ingest(s, FileAdapter(path), batch_size=500)
     assert resumed.status == PipelineRun.Status.SUCCEEDED
     assert resumed.notes["resumed_from"] == cp.position

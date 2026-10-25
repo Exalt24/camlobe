@@ -84,7 +84,7 @@ def _state(uid: str) -> SearchIndexState:
 
 
 def _mark_indexed(docs: list[dict]) -> None:
-    """indexed_version = the version that was sent, but only where the part has not changed since."""
+    """indexed_version = the version that was SENT (never the current one), so a part edited mid send stays behind."""
     if not docs:
         return
     values = ",".join("(%s,%s)" for _ in docs)
@@ -92,7 +92,7 @@ def _mark_indexed(docs: list[dict]) -> None:
     with connection.cursor() as cursor:
         cursor.execute(
             f"UPDATE catalog_part p SET indexed_version = v.version FROM (VALUES {values}) AS v(id, version) "
-            "WHERE p.id = v.id AND p.search_version = v.version AND p.indexed_version < v.version",
+            "WHERE p.id = v.id",
             params,
         )
 

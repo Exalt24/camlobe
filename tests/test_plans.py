@@ -40,7 +40,7 @@ def seed_bulk() -> None:
         c.execute(
             "INSERT INTO catalog_reviewitem (supplier_id, listing_key, norm_row_id, reason, candidate_part_ids, status, created_at)"
             " SELECT supplier_id, '|' || number_norm, id, 'no_brand', '[]', CASE WHEN id % 2000 = 0 THEN 'pending' ELSE 'linked' END, now()"
-            " FROM catalog_normalizedrow WHERE id % 20 = 0"
+            " FROM catalog_normalizedrow WHERE id % 10 = 0"
         )
         c.execute(
             "INSERT INTO catalog_vehicle (year, make, model, submodel, engine)"
@@ -93,6 +93,15 @@ def test_each_check_goes_red_when_its_index_is_dropped(bulk):
             assert not result.ok, f"{name} still passed without {index}"
             assert any(index in p or "Seq Scan" in p for p in result.problems)
         transaction.savepoint_rollback(sid)
+
+
+def test_a_seq_scan_on_a_big_table_is_a_problem_even_with_no_index_named(bulk):
+    from catalog.models import Part, Supplier
+
+    scanned = evaluate(PlanCheck("no index on description", Part.objects.filter(description="nothing like this")))
+    assert not scanned.ok and any("Seq Scan on catalog_part" in p for p in scanned.problems)
+    tiny = evaluate(PlanCheck("a one row table", Supplier.objects.filter(name="bulk")))
+    assert tiny.ok, tiny.problems  # a Seq Scan on a small table is the right plan and is not flagged
 
 
 def test_a_slow_query_fails_its_budget(bulk):

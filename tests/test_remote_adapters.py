@@ -192,6 +192,13 @@ def test_soap_a_page_that_keeps_returning_500_is_a_gap(soap):
     assert FeedCheckpoint.objects.get().position == 50
 
 
+def test_soap_a_401_stops_the_run_without_retrying(soap):
+    server, wsdl = soap(Behaviour(catalog_items(60), always={0: 401}))
+    run = ingest(get_supplier(), SoapAdapter(wsdl, page_size=50, sleep=NoSleep()))
+    assert run.status == PipelineRun.Status.FAILED and "refused our credentials" in run.errors[0]["message"]
+    assert len(server.behaviour.requests) == 1 and RawPart.objects.count() == 0
+
+
 def test_soap_refuses_credentials_in_the_wsdl_url():
     with pytest.raises(ValueError, match="separately"):
         SoapAdapter("http://user:pw@127.0.0.1:1/catalog?wsdl")

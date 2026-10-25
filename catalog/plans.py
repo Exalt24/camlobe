@@ -15,7 +15,7 @@ from django.db.models import F
 
 from .models import Fitment, NormalizedRow, Part, RawPart, ReviewItem, Vehicle
 
-BIG_TABLE_ROWS = 5000  # a Seq Scan on a table with fewer estimated rows is fine
+BIG_TABLE_ROWS = 5000  # on a smaller table a Seq Scan is the right plan, and an index is not demanded
 DEFAULT_BUDGET_MS = 250.0
 
 
@@ -65,7 +65,7 @@ def evaluate(check: PlanCheck) -> PlanResult:
             indexes.add(node["Index Name"])
         if kind == "Seq Scan" and _estimated_rows(relation) > BIG_TABLE_ROWS:
             problems.append(f"Seq Scan on {relation} (about {int(_estimated_rows(relation))} rows)")
-    if check.want_index and check.want_index not in indexes:
+    if check.want_index and check.want_index not in indexes and _estimated_rows(check.queryset.model._meta.db_table) > BIG_TABLE_ROWS:
         problems.append(f"index {check.want_index} not used (plan used: {sorted(indexes) or 'none'})")
     if ms > check.budget_ms:
         problems.append(f"took {ms:.1f} ms, budget {check.budget_ms:.0f} ms")

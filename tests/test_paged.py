@@ -86,6 +86,8 @@ def test_a_page_that_keeps_failing_becomes_a_gap_and_the_rest_is_still_read():
     gaps = [r for r in out if isinstance(r, SourceGap)]
     assert [(g.first_position, g.last_position) for g in gaps] == [(11, 20)]
     assert "gave up after 3 attempts" in gaps[0].message
+    assert a.notes()["requests"] == 5 and a.notes()["retries"] == 2  # 3 attempts on the bad page, 2 pages fine
+    assert len(a.clock.sleeps) == 2  # it does not wait again after the last attempt
     assert a.notes()["failed_pages"] == [10]
 
 

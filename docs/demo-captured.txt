@@ -1,0 +1,11 @@
+invented data: 3 suppliers, 6 files, Postgres 17
+ingest redline_catalog.csv           stored 14029, same   424, bad 213
+ingest harbor_catalog.xml            stored 12025, same     0, bad   0
+ingest delta_2026-10-01.csv          stored 12912, same     0, bad   0
+ingest delta_2026-10-15.csv          stored   658, same 12254, bad   0
+ingest delta_2026-10-22.csv          stored   384, same 12528, bad   0
+ingest delta_2026-10-29_unmapped.csv REFUSED: column renamed to 'producer'
+match  19098 parts from 38334 listings, 500 queued
+again  stored 0, matched 0: nothing changed
+fitment 15029 rows, again 0 new
+plans  8 of 8 queries use their indexes
