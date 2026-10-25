@@ -599,7 +599,7 @@ class PageSession:
         response.url = url
         response._content = body.encode() if isinstance(body, str) else body
         response.headers.update(headers)
-        response.encoding = None
+        response.encoding = requests.utils.get_encoding_from_headers(response.headers)  # as a real adapter sets it: ISO-8859-1 for text/* with no charset
         return response
 
 

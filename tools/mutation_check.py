@@ -443,6 +443,13 @@ MUTANTS: list[Mutant] = [
     D("scrape: the closing of a table is not noticed", "scrape", "handle_endtag", "negate the condition", 'tag == "table"', PAGES),
     # ---- a resume never skips by position over a source whose order can change -------------------------------------------------------------
     D("runner: a source that cannot be resumed by position is resumed by position", "runner", "_ingest_locked", "remove `not`", "restart = not getattr", PAGES),
+    # ---- a page is decoded as it declares itself, never as ISO-8859-1 by default ------------------------------------------------------------
+    D("scrape: a byte order mark is not looked for", "scrape", "decode_page", "negate the condition", "if data.startswith(bom)", PAGES),
+    D("scrape: a page that declares nothing is not read as UTF-8", "scrape", "decode_page", "delete the call statement", 'labels.append(("utf-8"', PAGES),
+    D("scrape: the charset of the Content-Type is ignored", "scrape", "decode_page", "negate the condition", "if header:", PAGES),
+    D("scrape: the charset of a meta tag is ignored", "scrape", "decode_page", "negate the condition", "if meta:", PAGES),
+    D("scrape: a meta tag may declare UTF-16", "scrape", "_codec", "negate the condition", "if from_meta and", PAGES),
+    D("scrape: a latin-1 page with an undefined windows-1252 byte is refused", "scrape", "decode_page", "negate the condition", "if codec in _LATIN_ONE:", PAGES),
 ]
 
 

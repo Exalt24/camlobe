@@ -258,3 +258,92 @@ def test_a_partial_run_leaves_the_checkpoint_where_the_next_run_starts_over_not_
     assert FeedCheckpoint.objects.get().position == 3
     run = ingest(supplier, adapter_for(catalog(9)))
     assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_read == 9 and FeedCheckpoint.objects.get().position == 9
+
+
+# ---- F4: page text is decoded with the page's own declaration, never with ISO-8859-1 by default -----------------------
+
+WORDS = ["Würth", "Bremsscheibe für Ø 280 mm", "Zubehör 5 € ab", "Łódź filtr", "日本語 部品", "plain ascii"]
+
+
+def one_page(body_bytes, content_type="text/html"):
+    return lambda url: (200, {"Content-Type": content_type}, body_bytes)
+
+
+def stored_fields(route):
+    out = records(adapter_for(route))
+    assert codes(out) == []
+    return rows(out)[0].fields
+
+
+def page_bytes(brand, description, encoding, head="", bom=b""):
+    html = products_table([("MF-1", brand, description, "12.50")], head=head)
+    return bom + html.encode(encoding)
+
+
+def test_a_utf8_page_with_no_charset_anywhere_is_read_as_utf8_and_not_as_latin1():
+    fields = stored_fields(one_page(page_bytes("Würth", "Bremsscheibe für Ø 280 mm", "utf-8")))
+    assert fields["Brand"] == "Würth" and fields["Description"] == "Bremsscheibe für Ø 280 mm"
+
+
+def test_the_stored_row_of_a_utf8_page_without_a_charset_is_not_mojibake():
+    run = ingest(get_supplier("u"), adapter_for(one_page(page_bytes("Würth", "Bremsscheibe für Ø 280 mm", "utf-8"))))
+    stored = RawPart.objects.get()
+    assert run.status == PipelineRun.Status.SUCCEEDED and (stored.brand_raw, stored.description_raw) == ("Würth", "Bremsscheibe für Ø 280 mm")
+
+
+@pytest.mark.parametrize(
+    "encoding, declared_in",
+    [
+        ("utf-8", "header"), ("utf-8", "meta"), ("utf-8", "bom"), ("utf-16", "bom"), ("utf-16", "header"),
+        ("cp1252", "header"), ("cp1252", "meta"), ("cp1252", "meta_http_equiv"), ("iso-8859-2", "header"), ("shift_jis", "meta"),
+    ],
+)
+def test_every_declaration_a_page_may_make_is_honoured_for_every_text(encoding, declared_in):
+    """The class: whatever the text, the encoding and the way the page says which one it is, the stored text is the original."""
+    for brand in WORDS:
+        try:
+            brand.encode(encoding)
+        except UnicodeEncodeError:
+            continue  # a text the encoding cannot hold is not a page in that encoding
+        label = {"cp1252": "windows-1252", "utf-16": "utf-16", "utf-8": "utf-8"}.get(encoding, encoding)
+        head, content_type, bom = "", "text/html", b""
+        if declared_in == "header":
+            content_type = f"text/html; charset={label}"
+        elif declared_in == "meta":
+            head = f'<meta charset="{label}">'
+        elif declared_in == "meta_http_equiv":
+            head = f'<meta http-equiv="Content-Type" content="text/html; charset={label}">'
+        elif declared_in == "bom":
+            bom = {"utf-8": b"\xef\xbb\xbf", "utf-16": b""}[encoding]
+        body = page_bytes(brand, "x", encoding, head=head, bom=bom)
+        if encoding == "utf-16" and declared_in == "bom":
+            body = ("﻿" + products_table([("MF-1", brand, "x", "12.50")])).encode("utf-16")  # the codec writes the BOM
+        assert stored_fields(one_page(body, content_type))["Brand"] == brand, (brand, encoding, declared_in)
+
+
+def test_the_header_outranks_a_meta_tag_as_a_browser_does():
+    body = page_bytes("Würth", "x", "utf-8", head='<meta charset="iso-8859-1">')
+    assert stored_fields(one_page(body, "text/html; charset=utf-8"))["Brand"] == "Würth"
+
+
+def test_a_page_that_declares_latin1_is_read_as_windows_1252_so_a_euro_sign_survives():
+    body = page_bytes("Zubehör 5 €", "x", "cp1252", head='<meta charset="iso-8859-1">')
+    assert stored_fields(one_page(body))["Brand"] == "Zubehör 5 €"
+
+
+def test_a_page_that_cannot_be_decoded_is_a_coded_gap_and_nothing_is_stored():
+    body = page_bytes("Würth", "x", "cp1252")  # legacy bytes, and the page says nothing: not UTF-8
+    run = ingest(get_supplier("bad"), adapter_for(one_page(body)))
+    assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_PAGE_ENCODING")
+    assert RawPart.objects.count() == 0
+
+
+def test_a_meta_tag_that_says_utf16_cannot_be_right_because_it_was_read_as_ascii():
+    body = page_bytes("Würth", "x", "utf-8", head='<meta charset="utf-16">')
+    assert stored_fields(one_page(body))["Brand"] == "Würth"
+
+
+def test_a_latin1_page_holding_a_byte_windows_1252_leaves_undefined_is_still_read():
+    body = page_bytes("Würth", "x", "cp1252").replace(b"x</td>", b"x\x81</td>")  # 0x81 is a C1 control in latin-1
+    out = records(adapter_for(one_page(body, "text/html; charset=iso-8859-1")))
+    assert codes(out) == [] and rows(out)[0].fields["Brand"] == "Würth"

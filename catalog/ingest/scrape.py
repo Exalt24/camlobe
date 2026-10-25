@@ -31,6 +31,7 @@ selector than with a regular expression.
 """
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import random
@@ -164,6 +165,53 @@ class _Transient(Exception):
 
 class _SessionExpired(Exception):
     pass
+
+
+# BOMs, longest first: the UTF-32 little endian mark starts with the UTF-16 one
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"),
+)
+_HEADER_CHARSET = re.compile(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
+_META_CHARSET = re.compile(rb"<meta[^>]+?charset\s*=\s*[\"']?\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
+_LATIN_ONE = frozenset({"iso8859-1", "latin-1", "ascii", "cp1252"})  # a browser reads all of these as windows-1252
+
+
+def _codec(label: str, from_meta: bool = False) -> str | None:
+    try:
+        name = codecs.lookup(label.strip()).name
+    except LookupError:
+        return None
+    if from_meta and name.startswith(("utf-16", "utf-32")):
+        return "utf-8"  # a meta tag is read as ASCII to find it, so a page that says UTF-16 there is not UTF-16
+    return name
+
+
+def decode_page(data: bytes, content_type: str = "") -> str:
+    """The text of a page, decoded as the page says: its byte order mark, else the charset of its Content-Type, else its meta
+    tag, else UTF-8. Never ISO-8859-1 by default (requests does that for any text/* type with no charset, which turns UTF-8
+    into mojibake). A latin-1 label reads as windows-1252, as a browser does. Raises UnicodeError when nothing fits."""
+    for bom, codec in _BOMS:
+        if data.startswith(bom):
+            return data.decode(codec)
+    labels = []
+    header = _HEADER_CHARSET.search(content_type or "")
+    if header:
+        labels.append((header.group(1), False))
+    meta = _META_CHARSET.search(data[:4096])
+    if meta:
+        labels.append((meta.group(1).decode("ascii", "replace"), True))
+    labels.append(("utf-8", False))
+    for label, from_meta in labels:
+        codec = _codec(label, from_meta)
+        if codec is None:
+            continue
+        try:
+            return data.decode("cp1252" if codec in _LATIN_ONE else codec)
+        except UnicodeDecodeError:
+            if codec in _LATIN_ONE:
+                return data.decode("latin-1")  # the few bytes windows-1252 leaves undefined are C1 controls in latin-1
+    raise UnicodeDecodeError("utf-8", data, 0, 1, "the page's declared charset does not fit its bytes")
 
 
 class _TagScan(HTMLParser):
@@ -362,6 +410,13 @@ class ScrapeAdapter:
                 rows.append([c.get_text(" ", strip=True) for c in cells])
         return header, rows
 
+    @staticmethod
+    def _decode(response: requests.Response) -> str:
+        try:
+            return decode_page(response.content, response.headers.get("Content-Type", ""))
+        except UnicodeError:
+            raise _Stop("E_PAGE_ENCODING", "the page cannot be decoded as text without replacement characters") from None
+
     def _page(self, url: str) -> _Page:
         """The page at `url`, logging in or in again when the site sends us to its login form."""
         while True:
@@ -390,7 +445,7 @@ class ScrapeAdapter:
         announced = response.headers.get("Content-Length", "")
         if announced.isdigit() and not response.headers.get("Content-Encoding") and len(response.content) != int(announced):
             raise _Stop("E_PAGE_TRUNCATED", "the body is not as long as the site said it would be")
-        text = response.text
+        text = self._decode(response)
         soup = BeautifulSoup(text, PARSER)
         table = soup.select_one(self.cfg.table_selector)
         self._refuse_a_challenge(soup, table)
@@ -413,7 +468,7 @@ class ScrapeAdapter:
 
     def _login(self) -> None:
         response = self._fetch(self.cfg.login_url, login_page=True)
-        soup = BeautifulSoup(response.text, PARSER)
+        soup = BeautifulSoup(self._decode(response), PARSER)
         self._refuse_a_challenge(soup)
         password_input = soup.select_one("input[type=password]")
         form = password_input.find_parent("form") if password_input is not None else None
@@ -432,7 +487,7 @@ class ScrapeAdapter:
         if posted.status_code in REDIRECT_STATUSES:
             refused = self._is_login(urljoin(action, posted.headers.get("Location", "")))
         elif posted.status_code == 200:
-            after = BeautifulSoup(posted.text, PARSER)
+            after = BeautifulSoup(self._decode(posted), PARSER)
             self._refuse_a_challenge(after)
             refused = after.select_one("input[type=password]") is not None
         if not refused and self.cfg.session_cookie and not any(c.name == self.cfg.session_cookie for c in self.session.cookies):
