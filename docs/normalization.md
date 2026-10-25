@@ -16,6 +16,8 @@ The brands, aliases and prefixes below are invented. They follow the shapes real
 | R6 | A letter outside A to Z after R1 rejects the number | Cyrillic look alikes of `A`, `B`, `C` | no guessing which letter was meant |
 | R7 | Fewer than 3 or more than 32 characters rejects the number | `AB`, a 34 character string | too short to identify a part, too long to be one |
 
+A padded and an unpadded form of one number can still end up as two canonical numbers (`00045678` becomes `45678`, `0045678` stays), so the match step queues the pair as a `zero_variant` instead of creating a second part.
+
 R4 and R5 repeat until nothing changes, so normalising a canonical number returns it unchanged. A prefix applied twice by a careless export (`MF-MF-H4123A`) is handled by the same loop.
 
 ## What is deliberately not done

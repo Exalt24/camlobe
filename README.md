@@ -85,17 +85,17 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 435 tests, needs Postgres on 5434 and Meilisearch on 7701
-python tools/mutation_check.py             # 144 guards, edits source in place: run it in a copy (--help)
+python -m pytest tests/ -o addopts=""      # 442 tests, needs Postgres on 5434 and Meilisearch on 7701
+python tools/mutation_check.py             # 148 guards, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and CI starts both.
 
-- 435 tests, all passing in a run on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
+- 442 tests, all passing in a run on 2026-10-26 ([output](docs/test-runs/2026-10-26-pytest.txt)); 435 passed on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)), before two reviewer findings were fixed.
 - Every rule has a test in both directions: the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures in every stage, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness: 144 guards, 144 killed, of which one was a hang that hit its time limit and 143 a failing test ([output](docs/test-runs/2026-10-25-mutation.txt)). The run was made in a copy of the repository in four parts. The harness reported ten survivors in its first passes. Each ended as a new test or assertion, the removal of a redundant guard, or a fix to the harness itself.
+- Mutation harness: 148 guards. On 2026-10-25 all 144 then in the harness were killed, of which one was a hang that hit its time limit and 143 a failing test ([output](docs/test-runs/2026-10-25-mutation.txt)). The run was made in a copy of the repository in four parts. The harness reported ten survivors in its first passes. Each ended as a new test or assertion, the removal of a redundant guard, or a fix to the harness itself. On 2026-10-26, after the two fixes, the 4 new guards and 9 touched ones were run in a copy and all 13 were killed ([output](docs/test-runs/2026-10-26-mutation-partial.txt)); the other 135 were not re-run after the fixes.
 
 ## Register: what ran and what did not
 

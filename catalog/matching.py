@@ -12,6 +12,7 @@ a canonical number and maybe a GTIN. In this order:
        - otherwise LINK to it (rule "exact").
   5. No such part:
        - the row's GTIN is held by another part (a typo, a renumbering or a rebrand): REVIEW (gtin_cross).
+       - the brand has a part with the same digits and another number of leading zeros: REVIEW (zero_variant).
        - otherwise CREATE the part (rule "new") and link.
 
 Same number under a different brand is NOT a match: two manufacturers use the same number all the time.

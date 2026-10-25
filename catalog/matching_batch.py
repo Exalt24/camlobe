@@ -27,6 +27,17 @@ class _Decision:
         return bool(self.reason)
 
 
+def _core(number: str) -> str:
+    return number.lstrip("0")
+
+
+def _zero_variants(by_brand_core: dict, row: NormalizedRow) -> list[Part]:
+    """Parts of the row's brand whose number is the row's number with more or fewer leading zeros."""
+    if not row.number_norm.isdigit() or not _core(row.number_norm):
+        return []
+    return [p for p in by_brand_core.get((row.brand, _core(row.number_norm)), []) if p.number_norm != row.number_norm]
+
+
 def _same(a: Part | None, b: Part | None) -> bool:
     return a is b or (a is not None and b is not None and a.pk is not None and a.pk == b.pk)
 
@@ -51,7 +62,13 @@ def match_batch(rows: list[NormalizedRow]) -> dict[str, int]:
         if (r.supplier_id, r.listing_key) in wanted
     }
     gtins = {r.gtin for r in rows if r.gtin}
+    cores = {_core(r.number_norm) for r in rows if r.brand and r.number_norm.isdigit()} - {""}
     found = {p.pk: p for p in Part.objects.filter(number_norm__in={r.number_norm for r in rows})}
+    zero_kin = list(Part.objects.filter(number_core__in=cores)) if cores else []
+    by_brand_core: dict[tuple[str, str], list[Part]] = defaultdict(list)
+    for p in zero_kin:
+        if p.number_norm.isdigit():
+            by_brand_core[(p.brand, _core(p.number_norm))].append(p)
     if gtins:
         found.update({p.pk: p for p in Part.objects.filter(gtin__in=gtins)})
     by_brand_number: dict[tuple[str, str], Part] = {(p.brand, p.number_norm): p for p in found.values()}
@@ -124,6 +141,10 @@ def match_batch(rows: list[NormalizedRow]) -> dict[str, int]:
                     gtin_updates[part.pk] = part
             decided[sk] = _Decision(row, key, part=part, rule="exact")
             state[row.pk] = M.MATCHED
+        elif _zero_variants(by_brand_core, row):
+            # the same digits padded with a different number of zeros: one part or two cannot be told from the number alone
+            decided[sk] = _Decision(row, key, reason=ReviewItem.Reason.ZERO_VARIANT, candidates=_zero_variants(by_brand_core, row))
+            state[row.pk] = M.REVIEW
         else:
             part = Part(
                 brand=row.brand,
@@ -135,6 +156,8 @@ def match_batch(rows: list[NormalizedRow]) -> dict[str, int]:
             new_parts.append(part)
             by_brand_number[(part.brand, part.number_norm)] = part
             by_number[part.number_norm].append(part)
+            if part.number_norm.isdigit():
+                by_brand_core[(part.brand, _core(part.number_norm))].append(part)
             if part.gtin:
                 by_gtin[part.gtin].append(part)
             decided[sk] = _Decision(row, key, part=part, rule="new")

@@ -6,7 +6,7 @@ Part is the canonical product; PartSource links one supplier's listing to it. Re
 every match the rules refuse to decide alone.
 """
 from django.db import models
-from django.db.models import F, Q
+from django.db.models import F, Func, Q, Value
 
 
 class Supplier(models.Model):
@@ -128,6 +128,10 @@ class NormalizedRow(models.Model):
 class Part(models.Model):
     brand = models.CharField(max_length=80)
     number_norm = models.CharField(max_length=40)
+    # the number without its leading zeros, kept by the database: two parts of one brand that share it are zero variants of each other
+    number_core = models.GeneratedField(
+        expression=Func(F("number_norm"), Value("0"), function="LTRIM"), output_field=models.CharField(max_length=40), db_persist=True
+    )
     description = models.TextField(blank=True)
     gtin = models.CharField(max_length=14, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -142,6 +146,7 @@ class Part(models.Model):
             # varchar_pattern_ops serves both "= value" and "LIKE 'prefix%'", so one index covers match and search
             models.Index(fields=["number_norm"], name="part_number_idx", opclasses=["varchar_pattern_ops"]),
             models.Index(fields=["gtin"], name="part_gtin_idx"),
+            models.Index(fields=["number_core"], name="part_core_idx"),
             models.Index(fields=["id"], name="part_search_dirty_idx", condition=Q(indexed_version__lt=F("search_version"))),
         ]
 
@@ -168,6 +173,7 @@ class ReviewItem(models.Model):
         NO_BRAND = "no_brand"
         GTIN_CONFLICT = "gtin_conflict"
         GTIN_CROSS = "gtin_cross"
+        ZERO_VARIANT = "zero_variant"
 
     class Status(models.TextChoices):
         PENDING = "pending"

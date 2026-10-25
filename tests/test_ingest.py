@@ -82,6 +82,17 @@ def test_the_same_content_under_a_new_file_name_stores_nothing_new(tmp_path):
     assert snapshot() == before
 
 
+def test_one_number_listed_under_two_brands_is_unchanged_when_a_dated_feed_arrives_again(tmp_path):
+    s = get_supplier()
+    rows = [row("123", "Marlow"), row("123", "Tarn"), row("456", "Marlow")]
+    first = ingest(s, FileAdapter(write_csv(tmp_path / "2026-10-01.csv", rows)))
+    assert (first.rows_read, first.rows_written, first.rows_unchanged) == (3, 3, 0)
+    before = snapshot()
+    again = ingest(s, FileAdapter(write_csv(tmp_path / "2026-10-02.csv", rows)))
+    assert (again.rows_read, again.rows_written, again.rows_unchanged) == (3, 0, 3)
+    assert snapshot() == before
+
+
 def test_a_changed_file_with_the_same_name_reads_again_and_stores_only_what_changed(tmp_path):
     s = get_supplier()
     path = tmp_path / "f.csv"

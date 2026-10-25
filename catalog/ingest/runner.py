@@ -132,20 +132,21 @@ def _store_batch(
     }
     with transaction.atomic():
         seen_keys = set(RawPart.objects.filter(idempotency_key__in=list(keys)).values_list("idempotency_key", flat=True))
-        latest = dict(
-            RawPart.objects.filter(supplier=supplier, part_number_raw__in=part_numbers)
-            .order_by("part_number_raw", "-id")
-            .distinct("part_number_raw")
-            .values_list("part_number_raw", "content_hash")
-        )
+        latest = {
+            (number, brand): chash
+            for number, brand, chash in RawPart.objects.filter(supplier=supplier, part_number_raw__in=part_numbers)
+            .order_by("part_number_raw", "brand_raw", "-id")
+            .distinct("part_number_raw", "brand_raw")
+            .values_list("part_number_raw", "brand_raw", "content_hash")
+        }
         to_insert: list[RawPart] = []
         unchanged = 0
         for rec, row, chash in mapped:
             key = idempotency_key(supplier.code, run.source_ref, rec.position, chash)
-            if key in seen_keys or latest.get(row.part_number) == chash:
+            if key in seen_keys or latest.get((row.part_number, row.brand)) == chash:
                 unchanged += 1
                 continue
-            latest[row.part_number] = chash
+            latest[(row.part_number, row.brand)] = chash
             to_insert.append(
                 RawPart(
                     supplier=supplier,

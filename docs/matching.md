@@ -11,6 +11,7 @@
    - otherwise link it (rule `exact`).
 5. No such part:
    - the row's GTIN is held by another part (a typo, a renumbering or a rebrand): queue it as `gtin_cross`.
+   - the brand already has a part with the same digits and a different number of leading zeros (`0045678` against `00045678`): queue it as `zero_variant`.
    - otherwise create the part (rule `new`) and link it.
 
 The same number under a different brand is not a match. Two manufacturers use the same number all the time.
@@ -22,6 +23,7 @@ The same number under a different brand is not a match. Two manufacturers use th
 | `no_brand` | a feed that leaves the manufacturer out | the number alone fits several parts, or none |
 | `gtin_conflict` | two suppliers disagree on the barcode of one brand and number | one of them is wrong, and which one is not in the data |
 | `gtin_cross` | a part renumbered or superseded, a typo in a number, a rebrand | merging would hide a real difference, creating would duplicate a barcode |
+| `zero_variant` | a fixed width export that pads a number the other supplier sends without the padding | the number alone cannot say whether the zeros are padding or part of the number, so one part or two is a person's call |
 
 A person resolves an item with `python manage.py resolve_review --item ID --part PART_ID`, `--new-part [--brand X]` or `--ignore`. Resolving to a part creates the listing's link, and later rows for that listing flow through the link. An ignored listing stays out of the catalog.
 
@@ -35,4 +37,5 @@ Rows are decided in id order, so a run is deterministic. When several versions o
 
 - The order feeds arrive in can change which side of a GTIN disagreement is queued. The set of parts is the same either way (`test_the_parts_do_not_depend_on_the_order_the_feeds_arrive_in`).
 - There is no fuzzy matching between numbers and no supersession table. A renumbered part appears as a `gtin_cross` item or as a new part.
+- The zero variant check covers all digit numbers only. A zero run after letters (`AB0123` against `AB123`) is not compared, since no export rule in these notes pads that shape.
 - A change to the normalisation rules does not re match old rows. Rows carry the rule version, and the normalize command reports how many are stale.

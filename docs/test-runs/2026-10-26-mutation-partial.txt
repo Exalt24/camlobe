@@ -1,0 +1,15 @@
+[1/13] killed   normalize: brands with a real leading zero lose it  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[2/13] killed   normalize: zero padding stripped from short numbers too  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[3/13] killed   normalize: zeros stripped below 4 digits  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[4/13] killed   normalize: prefix and zero rules run once, not to a fixed point  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[5/13] killed   mapping: the row position is left out of the idempotency key  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[6/13] killed   runner: an unchanged row is stored again  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[7/13] killed   runner: the unchanged check ignores the brand  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[8/13] killed   runner: a seen idempotency key is stored again  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[9/13] killed   match: a zero padded variant of a part is created as a second part  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[10/13] killed   match: parts already stored are not consulted for zero variants  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[11/13] killed   match: a part made in this batch is not seen as a zero variant  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[12/13] killed   schema: an idempotency key can repeat  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+[13/13] killed   x12: an accepted line may carry quantity zero  (!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!)
+
+killed 13 of 13 in 24 s
