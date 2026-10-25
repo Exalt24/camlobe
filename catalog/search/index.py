@@ -20,11 +20,11 @@ from django.db import connection, transaction
 from django.db.models import F
 
 from ..models import Part, PipelineRun, SearchIndexState
-from ..normalize import canonical_brand
 from ..runs import add_error, advisory_lock, finish_run, start_run
-from .documents import documents_for, interpret_query
+from .documents import documents_for, search_legs
 
 TASK_TIMEOUT_MS = 60_000
+RETRIEVE = ["id", "brand", "number", "description", "gtin", "suppliers", "supplier_count", "lowest_cost_cents"]
 
 SETTINGS = {
     "searchableAttributes": ["number", "brand", "description", "gtin"],
@@ -181,20 +181,33 @@ def sync(batch_size: int = 1000) -> PipelineRun:
             return finish_run(run, PipelineRun.Status.FAILED)
 
 
+def _leg_query(leg: dict) -> dict:
+    """One leg of a search as a Meilisearch query. A brand reaches the filter only as letters and digits."""
+    query: dict = {
+        "indexUid": live_uid(),
+        "q": leg["value"],
+        "attributesToRetrieve": RETRIEVE,
+        # every word must be found: the default drops words from the end until something matches
+        "matchingStrategy": "all",
+        "attributesToSearchOn": {"number": ["number"], "gtin": ["gtin"], "text": ["brand", "description"]}[leg["kind"]],
+    }
+    if leg["brand"]:
+        query["filter"] = f'brand = "{leg["brand"]}"'
+    return query
+
+
 def search(q: str, limit: int = 20, offset: int = 0, brand: str = "") -> dict:
-    """Search the live index. Returns {"count": int, "results": [document, ...]}."""
-    query = interpret_query(q)
-    options = {"limit": limit, "offset": offset, "attributesToRetrieve": ["id", "brand", "number", "description", "gtin", "suppliers", "supplier_count", "lowest_cost_cents"]}
-    # a brand reaches the filter string only as letters and digits, so it cannot carry filter syntax
-    wanted = {canonical_brand(brand), query["brand"]} - {""}
-    if len(wanted) > 1:
-        return {"count": 0, "results": []}  # two different brands asked for at once
-    if wanted:
-        options["filter"] = f'brand = "{wanted.pop()}"'
-    if query["kind"] in ("number", "gtin"):
-        options["attributesToSearchOn"] = ["number"] if query["kind"] == "number" else ["gtin"]
+    """Search the live index. Returns {"count": int, "results": [document, ...]}.
+
+    The query is read into legs (documents.search_legs, the reading the database backend shares) and the legs
+    are sent as one federated search, which returns each part once however many legs found it.
+    """
+    legs = search_legs(q, brand)
+    if not legs:
+        return {"count": 0, "results": []}
     try:
-        result = client().index(live_uid()).search(query["value"], options)
+        result = client().multi_search([_leg_query(leg) for leg in legs], federation={"limit": limit, "offset": offset})
     except meilisearch.errors.MeilisearchError as exc:
         raise SearchUnavailable(str(exc)) from exc
-    return {"count": result.get("estimatedTotalHits", len(result["hits"])), "results": result["hits"]}
+    hits = [{k: v for k, v in hit.items() if k != "_federation"} for hit in result["hits"]]
+    return {"count": result.get("estimatedTotalHits", len(hits)), "results": hits}

@@ -40,12 +40,17 @@ def staging_exists(client):
 
 
 def test_query_interpretation():
-    assert interpret_query("h-4123 a") == {"kind": "number", "value": "H4123A", "brand": ""}
-    assert interpret_query("marlow h4123a") == {"kind": "number", "value": "H4123A", "brand": "MARLOW"}
-    assert interpret_query("5012345678900") == {"kind": "gtin", "value": "05012345678900", "brand": ""}
-    assert interpret_query("oil filter") == {"kind": "text", "value": "oil filter", "brand": ""}
-    assert interpret_query("  ")["kind"] == "text"
+    def main(q):
+        got = interpret_query(q)
+        return {k: got[k] for k in ("kind", "value", "brand")}
+
+    assert main("h-4123 a") == {"kind": "number", "value": "H4123A", "brand": ""}
+    assert main("marlow h4123a") == {"kind": "number", "value": "H4123A", "brand": "MARLOW"}
+    assert main("5012345678900") == {"kind": "gtin", "value": "05012345678900", "brand": ""}
+    assert main("oil filter") == {"kind": "text", "value": "oil filter", "brand": ""}
+    assert interpret_query("  ")["kind"] == "empty"  # nothing to search for: an empty answer, not the whole catalog
     assert interpret_query("a1")["value"] == "A1"  # too short to be a number: still searched as typed, not dropped
+    assert ("", "H4123A") in interpret_query("h-4123 a")["forms"]
 
 
 def test_a_rebuild_puts_every_part_in_the_live_index_and_removes_the_staging_one(tmp_path, meili):

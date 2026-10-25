@@ -83,10 +83,12 @@ def test_search_never_matches_a_number_that_is_one_character_off(world):
 
 
 def test_search_pagination(world):
-    r = get(world, "/api/parts/search/", q="e", limit=2, offset=0)
-    assert r.json()["count"] >= 3 and len(r.json()["results"]) == 2
-    second = get(world, "/api/parts/search/", q="e", limit=2, offset=2)
-    assert not set(numbers(r)) & set(numbers(second))
+    # "s" starts a word of two parts (Spark plug, Strut assembly): a text word is a word prefix, not a substring
+    r = get(world, "/api/parts/search/", q="s", limit=1, offset=0)
+    assert r.json()["count"] == 2 and len(r.json()["results"]) == 1
+    second = get(world, "/api/parts/search/", q="s", limit=1, offset=1)
+    assert len(second.json()["results"]) == 1 and not set(numbers(r)) & set(numbers(second))
+    assert get(world, "/api/parts/search/", q="s", limit=1, offset=2).json()["results"] == []
 
 
 @pytest.mark.parametrize(
