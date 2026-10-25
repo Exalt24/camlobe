@@ -243,3 +243,88 @@ def test_a_request_that_succeeds_with_a_secret_in_its_url_is_logged_without_it(s
     run = ingest(get_supplier("s"), scrape(site, start_url=f"{site.url}/catalog?page=1&token={API_KEY}"))
     assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 4
     assert "GET /catalog" in caplog.text and API_KEY not in everything_stored(caplog)
+
+
+# ---- second output round: the pieces a library cuts a secret into at URL delimiters --------------------------------------------
+
+
+import re  # noqa: E402
+
+import requests  # noqa: E402
+from hypothesis import assume, given, settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+from catalog.ingest.redact import REDACTED, Redactor, userinfo_secrets  # noqa: E402
+
+BACKSLASH = chr(92)
+PUNCTUATION = string.punctuation  # every printable punctuation character
+SECRET_TEXT = st.text(alphabet=string.ascii_letters + string.digits + PUNCTUATION, min_size=1, max_size=30)
+
+
+def pieces_of(secret: str) -> set[str]:
+    """What a URL parser can cut a secret into: the parts between URL delimiters and percent forms, 4 characters or longer."""
+    return {piece for piece in re.split(r"[\\/?#@:%]", secret) if len(piece) >= 4}
+
+
+def real_error_text(url: str) -> str:
+    """The text requests REALLY produces for this proxy URL (a proxy that cannot be parsed, or one that refuses)."""
+    try:
+        requests.Session().get("http://127.0.0.1:9/", proxies={"http": url}, timeout=1)
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def test_the_first_half_of_a_proxy_password_with_a_backslash_is_not_left_in_the_error_requests_raises():
+    password = "Zq9pass" + BACKSLASH + "word77"
+    url = f"http://camuser:{password}@127.0.0.1:3128"
+    raw = real_error_text(url)
+    assert "Zq9pass" in raw  # requests and urllib3 split the URL at the backslash: this is the text the runner would store
+    out = Redactor(userinfo_secrets(url)).text(raw)
+    assert "Zq9pass" not in out and "word77" not in out and "camuser" not in out and "InvalidURL" in out
+
+
+@given(SECRET_TEXT)
+@settings(max_examples=60, deadline=None)
+def test_no_piece_of_a_secret_a_library_cuts_it_into_survives_in_the_real_error_text_of_a_malformed_proxy(secret):
+    """The class: credential text reaches stored run errors by a route the whole-secret match does not cover."""
+    url = f"http://camuser:{secret}@127.0.0.1:3128"
+    out = Redactor(userinfo_secrets(url)).text(real_error_text(url))
+    clean = out.replace(REDACTED, "")
+    for piece in pieces_of(secret) | ({secret} if len(secret) >= 4 else set()):
+        assert piece not in clean, (secret, piece, out)
+
+
+@given(SECRET_TEXT, st.sampled_from([BACKSLASH, "/", "?", "#", "@", ":", "%5C", "%40", "%3A", "%2f"]))
+@settings(max_examples=200, deadline=None)
+def test_a_secret_cut_at_any_url_delimiter_is_removed_piece_by_piece_from_any_text(secret, cut):
+    joined = secret + cut + secret[::-1] + "k9x2"  # a password that holds the delimiter
+    out = Redactor([joined]).text(f"boom {joined[: len(secret)]} | {joined[len(secret) + len(cut):]} | {joined} end").replace(REDACTED, "")
+    for piece in pieces_of(joined):
+        assert piece not in out
+
+
+ORDINARY_ERRORS = [
+    "InvalidURL: Failed to parse: 'http://127.0.0.1:99999' is not a valid host or port",
+    "ConnectionError", "ReadTimeout", "ChunkedEncodingError", "HTTP 500", "HTTP 429 on every one of 4 attempts",
+    "E_PAGE_TRUNCATED: the page ends inside its product table, so nothing is read from it",
+    "E_LOGIN_REQUIRED: the site wants a login and the config has no login_url",
+    "E_PROXY_UNAVAILABLE: every proxy refused the connection", "E_REQUEST_INVALID: the request cannot be made as configured (an invalid URL, header or proxy setting, or a missing dependency); see the config",
+    "E_RATE_LIMITED: the site asked for a wait of 3600 s, longer than the 30 s allowed", "positions 11-20", "the page at offset 100 had 40 items",
+    "SOAP fault Server.Busy", "the answer was not the expected JSON", "no column maps to cost; the feed has Colour, Size",
+]
+
+
+@given(SECRET_TEXT)
+@settings(max_examples=200, deadline=None)
+def test_the_fixed_phrases_of_ordinary_errors_are_unchanged_by_the_pieces_of_any_secret(secret):
+    redactor = Redactor([secret, f"http://camuser:{secret}@127.0.0.1:3128"])
+    for text in ORDINARY_ERRORS:
+        assume(not any(piece in text for piece in pieces_of(secret)) and secret not in text)
+        assert redactor.text(text) == text
+
+
+def test_the_url_of_a_proxy_is_one_secret_and_its_host_and_scheme_are_not():
+    redactor = Redactor(userinfo_secrets("http://pxuser:Pw99xx@proxy.example:8080"))
+    assert redactor.text("connecting to proxy.example port 8080 over http") == "connecting to proxy.example port 8080 over http"
+    assert REDACTED in redactor.text("bad: http://pxuser:Pw99xx@proxy.example:8080")

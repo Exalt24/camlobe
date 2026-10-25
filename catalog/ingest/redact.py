@@ -41,10 +41,24 @@ def secret_name(name: str) -> bool:
     return bool(words & SECRET_WORDS) or name.lower() in SECRET_WORDS
 
 
+MIN_PIECE = 4  # a piece of a secret shorter than this is not taken out of text: it would turn ordinary words into placeholders
+_DELIMITERS = re.compile(r"[\\/?#@:]|%[0-9A-Fa-f]{2}|%")  # where a URL parser cuts: the backslash, slash, ? # @ :, and a percent form
+
+
+def _pieces(form: str) -> set[str]:
+    """The parts of a secret a library may show on their own. `requests` and urllib3 split a proxy URL at its delimiters, so a
+    password such as `Zq9pass<backslash>word77` is cut at the backslash and the first half is quoted in the error ('...:Zq9pass'
+    is not a valid host or port) with the rest gone. Each part of 4 characters or more is a secret too."""
+    return {piece for piece in _DELIMITERS.split(form) if len(piece) >= MIN_PIECE}
+
+
 def _forms(secret: str) -> set[str]:
     """The ways a message may show `secret`: as it is, percent encoded, form encoded, and as the inside of a repr."""
     out = {secret, quote(secret, safe=""), quote_plus(secret), unquote(secret), unquote_plus(secret), repr(secret)[1:-1]}
-    return {form for form in out if form}
+    out = {form for form in out if form}
+    if "://" in secret:  # a URL is removed whole: its host and scheme are no secret, and nor are the pieces of its encoded form
+        return out
+    return out | {piece for form in out for piece in _pieces(form)}
 
 
 class Redactor:
@@ -126,10 +140,9 @@ def userinfo_secrets(url: str) -> list[str]:
     The whole URL is a secret too when it carries credentials: an error that quotes it must not show its other half.
     """
     rest = url.split("://", 1)[-1]
-    authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
-    if "@" not in authority:
+    if "@" not in rest:
         return []
-    userinfo = authority.rsplit("@", 1)[0]
+    userinfo = rest.rsplit("@", 1)[0]  # up to the LAST @, whatever the password holds: a # or a / in it would end an "authority"
     user, _, password = userinfo.partition(":")
     out = [url]
     if password:

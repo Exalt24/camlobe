@@ -502,6 +502,10 @@ MUTANTS: list[Mutant] = [
     # F14: a cell holding two amounts is rejected, never glued into one
     D("mapping: a cell with two dollar signs is read as one amount", "mapping", "parse_cost_cents", "negate the condition", 'text.count("$") > 1', MAP, PAGES),
     D("mapping: digits split by spaces are glued into one amount", "mapping", "parse_cost_cents", "negate the condition", "and not re.fullmatch", MAP, PAGES),
+    # F15: the pieces a library cuts a secret into at URL delimiters are secrets too
+    D("redact: the pieces a library cuts a secret into are left in the text", "redact", "_pieces", "GtE -> Lt", "len(piece) >= MIN_PIECE", SECRETS),
+    D("redact: a URL secret is cut at its delimiters like a password", "redact", "_forms", "negate the condition", 'if "://" in secret', SECRETS),
+    D("redact: the userinfo of a proxy URL ends before its last @", "redact", "userinfo_secrets", "1 -> 2", 'rsplit("@", 1)', SECRETS),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]
