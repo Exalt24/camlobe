@@ -475,6 +475,14 @@ MUTANTS: list[Mutant] = [
     D("scrape: a page read under its second address is read again", "scrape", "_walk", "delete the call statement", "seen.add(served)", PAGES),
     D("scrape: a next link back to the page served is followed", "scrape", "_next_url", "In -> NotIn", 'return "" if target in itself', PAGES),
     D("scrape: a base element is not the base of a link", "scrape", "_next_url", "negate the condition", "if base_tag is not None", PAGES),
+    # F5, F6, F7: the table's own rows and cells, a th in a body row, a spanned cell, a second header row
+    D("scrape: the rows of a nested table are rows of the product table", "scrape", "_table", "Is -> IsNot", "own = [tr for tr", PAGES),
+    D("scrape: the cells of a nested table are cells of the row", "scrape", "_cells", "False -> True", "recursive=False", PAGES),
+    D("scrape: a th in a body row is not a cell", "scrape", "_cells", "string 'th' -> ''", 'kinds=("td", "th")', PAGES),
+    D("scrape: a header cell with colspan counts as one column", "scrape", "_table", "Add -> Sub", "header.extend", PAGES),
+    D("scrape: a body cell with colspan fills no more cells", "scrape", "_table", "Sub -> Add", "cells.extend", PAGES),
+    D("scrape: a second row of the thead is data", "scrape", "_table", "NotEq -> Eq", 'tr.parent.name != "thead"', PAGES),
+    D("scrape: the header is the first row of the table, not of the thead", "scrape", "_table", "Eq -> NotEq", 'tr.parent.name == "thead"', PAGES),
 ]
 
 

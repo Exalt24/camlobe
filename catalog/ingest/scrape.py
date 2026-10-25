@@ -76,6 +76,7 @@ DEFAULT_CHALLENGE_MARKERS = (
 PARSER = "lxml"  # closes an unclosed <td> or <tr> the way a browser does; the stdlib parser nests them instead
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 MAX_REDIRECT_HOPS = 3
+MAX_COLSPAN = 1000  # the HTML standard's own limit for a colspan
 
 
 PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
@@ -436,18 +437,39 @@ class ScrapeAdapter:
         return any("disabled" in c.lower() for c in classes) or str(link.get("aria-disabled", "")).strip().lower() == "true" or link.has_attr("disabled")
 
     @staticmethod
+    def _cells(tr, kinds=("td", "th")) -> list:
+        return tr.find_all(kinds, recursive=False)  # the row's own cells: a table nested in a cell has its own rows
+
+    @staticmethod
+    def _span(cell) -> int:
+        try:
+            return min(max(int(str(cell.get("colspan", "1")).strip()), 1), MAX_COLSPAN)
+        except ValueError:
+            return 1
+
+    @staticmethod
     def _table(table) -> tuple[list[str], list[list[str]]]:
-        trs = table.find_all("tr")
-        if not trs:
+        """(the header, the rows) of the product table, read from ITS OWN rows (never a nested table's) and cells (a th in a body
+        row is a cell like a td). A cell with colspan fills that many columns, in the header and in a row. The header is the
+        first row of the thead that has any text (a second one, a filter row, is skipped), else the first row of the table."""
+        own = [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+        if not own:
             return [], []
-        head = table.select("thead th") or trs[0].find_all(["th", "td"])
-        header = [h.get_text(" ", strip=True) for h in head]
-        body = table.select("tbody tr") or trs[1:]
+        in_head = [tr for tr in own if tr.parent.name == "thead"]
+        header_tr = next((tr for tr in in_head if tr.get_text(strip=True)), in_head[0] if in_head else own[0])
+        header: list[str] = []
+        for cell in ScrapeAdapter._cells(header_tr):
+            text = cell.get_text(" ", strip=True)
+            header.extend([text, *[f"{text} ({n})" if text else "" for n in range(2, ScrapeAdapter._span(cell) + 1)]])
+        body = [tr for tr in own if tr.parent.name == "tbody"] or [tr for tr in own if tr is not header_tr and tr.parent.name != "thead"]
         rows = []
         for tr in body:
-            cells = tr.find_all("td")
-            if cells:
-                rows.append([c.get_text(" ", strip=True) for c in cells])
+            if tr is header_tr or not ScrapeAdapter._cells(tr, ("td",)):  # a row of th cells only is a heading, not a part
+                continue
+            cells: list[str] = []
+            for cell in ScrapeAdapter._cells(tr):
+                cells.extend([cell.get_text(" ", strip=True), *[""] * (ScrapeAdapter._span(cell) - 1)])
+            rows.append(cells)
         return header, rows
 
     @staticmethod

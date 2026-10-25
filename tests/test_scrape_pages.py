@@ -8,6 +8,8 @@ import random
 import re
 
 import pytest
+from hypothesis import given, settings as hyp_settings
+from hypothesis import strategies as st
 
 from catalog.ingest.adapters import SourceGap, SourceRecord
 from catalog.ingest.paged import FatalError
@@ -724,3 +726,140 @@ def test_a_base_element_after_a_redirect_is_resolved_against_the_address_served(
         return 404, {}, ""
 
     assert codes(records(adapter_for(route, start_url=f"{BASE}/parts"))) == [] and seen[-1] == "/parts/more/page/2/"
+
+
+# ---- F5, F6, F7: the table's own rows and cells, a th in a body row, a spanned cell, a second header row ------------------------
+
+
+def table_page(html):
+    return adapter_for(lambda url: (200, {}, f'<html><head></head><body><table class="products">{html}</table></body></html>'))
+
+
+def read_table(html):
+    out = records(table_page(html))
+    assert codes(out) == [], codes(out)
+    return [(r.reject, r.fields) for r in rows(out)]
+
+
+HEAD4 = "<tr><th>Part No</th><th>Brand</th><th>Description</th><th>Price</th></tr>"
+ROW = lambda n, price="10.00": f"<tr><td>MF-{n}</td><td>Marlow</td><td>Filter {n}</td><td>{price}</td></tr>"
+WANT = lambda n, price="10.00": {"Part No": f"MF-{n}", "Brand": "Marlow", "Description": f"Filter {n}", "Price": price}
+BREAKS = '<table class="breaks"><tr><td>1-9</td><td>$10.00</td></tr><tr><td>10+</td><td>$9.00</td></tr></table>'
+
+
+def test_a_table_nested_in_a_cell_is_the_text_of_that_cell_and_its_rows_are_not_rows_of_the_product_table():
+    html = (
+        "<thead><tr><th>Part No</th><th>Brand</th><th>Description</th><th>Price</th><th>Qty breaks</th></tr></thead><tbody>"
+        f"<tr><td>MF-1</td><td>Marlow</td><td>Oil filter</td><td>10.00</td><td>{BREAKS}</td></tr>"
+        "<tr><td>MF-2</td><td>Marlow</td><td>Air filter</td><td>5.00</td><td>none</td></tr></tbody>"
+    )
+    got = read_table(html)
+    assert [f["Part No"] for _, f in got] == ["MF-1", "MF-2"] and all(reject == "" for reject, _ in got)
+    assert got[0][1]["Qty breaks"] == "1-9 $10.00 10+ $9.00"
+
+
+def test_a_table_nested_in_the_header_or_with_no_tbody_is_still_one_table():
+    html = f"<tr><th>Part No</th><th>Brand</th><th>Description</th><th>Price</th></tr><tr><td>MF-1</td><td>Marlow</td><td>x</td><td>{BREAKS}</td></tr>"
+    got = read_table(html)
+    assert len(got) == 1 and got[0][0] == "" and got[0][1]["Price"] == "1-9 $10.00 10+ $9.00"
+
+
+def test_a_part_number_in_a_th_scope_row_is_a_cell_like_any_other():
+    html = (
+        '<thead><tr><th scope="col">Part No</th><th scope="col">Brand</th><th scope="col">Description</th><th scope="col">Price</th></tr></thead>'
+        '<tbody><tr><th scope="row">MF-1</th><td>Marlow</td><td>Filter 1</td><td>10.00</td></tr>'
+        '<tr><th scope="row">MF-2</th><td>Marlow</td><td>Filter 2</td><td>10.00</td></tr></tbody>'
+    )
+    assert read_table(html) == [("", WANT(1)), ("", WANT(2))]
+
+
+def test_a_th_only_row_in_the_body_is_a_heading_not_a_part():
+    html = f"<thead>{HEAD4}</thead><tbody>{ROW(1)}<tr><th colspan=\"4\">Brake parts</th></tr>{ROW(2)}</tbody>"
+    assert read_table(html) == [("", WANT(1)), ("", WANT(2))]
+
+
+def test_a_header_cell_with_colspan_counts_as_that_many_columns_and_a_body_cell_with_colspan_fills_them():
+    html = (
+        '<thead><tr><th>Part No</th><th>Brand</th><th>Description</th><th colspan="2">Price</th></tr></thead><tbody>'
+        "<tr><td>MF-1</td><td>Marlow</td><td>Oil filter</td><td>10.00</td><td><button>Add</button></td></tr>"
+        '<tr><td>MF-2</td><td>Marlow</td><td colspan="3">Air filter, no price listed</td></tr></tbody>'
+    )
+    got = read_table(html)
+    assert got[0] == ("", {"Part No": "MF-1", "Brand": "Marlow", "Description": "Oil filter", "Price": "10.00", "Price (2)": "Add"})
+    assert got[1][0] == "" and got[1][1]["Description"] == "Air filter, no price listed" and got[1][1]["Price"] == ""
+
+
+@pytest.mark.parametrize("filter_first", [False, True])
+def test_a_second_header_row_such_as_a_filter_row_is_neither_data_nor_a_second_header(filter_first):
+    labels = HEAD4
+    filters = "<tr><th><input name=\"q1\"></th><th><input name=\"q2\"></th><th><input name=\"q3\"></th><th></th></tr>"
+    thead = (filters + labels) if filter_first else (labels + filters)
+    assert read_table(f"<thead>{thead}</thead><tbody>{ROW(1)}{ROW(2)}</tbody>") == [("", WANT(1)), ("", WANT(2))]
+
+
+ORDINARY_TABLES = {
+    "thead and tbody": f"<thead>{HEAD4}</thead><tbody>{ROW(1)}{ROW(2)}</tbody>",
+    "no thead, th first row": f"{HEAD4}{ROW(1)}{ROW(2)}",
+    "header row inside tbody": f"<tbody>{HEAD4}{ROW(1)}{ROW(2)}</tbody>",
+    "td header row": f"<tr><td>Part No</td><td>Brand</td><td>Description</td><td>Price</td></tr>{ROW(1)}{ROW(2)}",
+    "tfoot after tbody": f"<thead>{HEAD4}</thead><tbody>{ROW(1)}{ROW(2)}</tbody><tfoot><tr><td colspan=\"4\">2 parts</td></tr></tfoot>",
+    "empty cell": f"<thead>{HEAD4}</thead><tbody>{ROW(1)}{ROW(2, '')}</tbody>",
+    "upper case tags": re.sub(r"</?[a-z]+", lambda m: m.group(0).upper(), f"<thead>{HEAD4}</thead><tbody>{ROW(1)}{ROW(2)}</tbody>"),
+    "attributes and links": '<thead class="x">' + HEAD4.replace("<th>", '<th scope="col" class="h">') + '</thead><tbody id="b">' + ROW(1).replace("<td>", '<td class="c">') + ROW(2) + "</tbody>",
+    "unclosed cells and rows": "<thead><tr><th>Part No<th>Brand<th>Description<th>Price</thead><tbody><tr><td>MF-1<td>Marlow<td>Filter 1<td>10.00<tr><td>MF-2<td>Marlow<td>Filter 2<td>10.00</tbody>",
+}
+
+
+@pytest.mark.parametrize("name", list(ORDINARY_TABLES))
+def test_the_ordinary_table_shapes_read_exactly_as_before(name):
+    want = [("", WANT(1)), ("", WANT(2, "" if name == "empty cell" else "10.00"))]
+    assert read_table(ORDINARY_TABLES[name]) == want
+
+
+@given(
+    st.integers(2, 6),  # columns
+    st.integers(1, 5),  # rows
+    st.booleans(),  # a thead
+    st.booleans(),  # a tbody around the rows
+    st.booleans(),  # a filter row after the labels
+    st.booleans(),  # the first cell of a body row is a th scope=row
+    st.integers(-1, 5),  # the column whose header spans two columns (-1: none)
+    st.integers(-1, 4),  # the row of the column under which a table is nested (-1: none)
+    st.data(),
+)
+@hyp_settings(max_examples=120, deadline=None)
+def test_any_mix_of_table_structure_reads_as_the_grid_it_describes(cols, nrows, thead, tbody, filter_row, row_th, span_at, nest_row, data):
+    """The class: table structure read by recursive find_all instead of the table's own rows and cells. Whatever combination of
+    a thead, a filter row, row header cells, a spanned header and a nested table the page uses, the records are the grid."""
+    header = [f"Col{c}" for c in range(cols)]
+    grid = [[f"r{r}c{c}" for c in range(cols)] for r in range(nrows)]
+    span_at = span_at if 0 <= span_at < cols - 1 else -1  # the spanned header covers the column and the one after it
+    head_cells, c = [], 0
+    while c < cols:
+        if c == span_at:
+            head_cells.append(f'<th colspan="2">{header[c]}</th>')
+            c += 2
+        else:
+            head_cells.append(f"<th>{header[c]}</th>")
+            c += 1
+    expected_header = list(header)
+    if span_at >= 0:
+        expected_header[span_at + 1] = f"{header[span_at]} (2)"
+    labels = "<tr>" + "".join(head_cells) + "</tr>"
+    filters = "<tr>" + "".join('<th><input name="f"></th>' for _ in head_cells) + "</tr>"
+    body, want = [], []
+    for r, values in enumerate(grid):
+        cells, wanted = [], list(values)
+        for c, value in enumerate(values):
+            inner = value
+            if r == nest_row and c == cols - 1:
+                inner += '<table class="inner"><tr><td>a</td><td>b</td></tr></table>'
+                wanted[c] = f"{value} a b"
+            tag = "th" if (row_th and c == 0) else "td"
+            cells.append(f'<{tag}{" scope=\"row\"" if tag == "th" else ""}>{inner}</{tag}>')
+        body.append("<tr>" + "".join(cells) + "</tr>")
+        want.append(dict(zip(expected_header, wanted)))
+    rows_html = f"<tbody>{''.join(body)}</tbody>" if tbody else "".join(body)
+    head = f"<thead>{labels}{filters if filter_row else ''}</thead>{rows_html}" if thead else labels + rows_html
+    got = read_table(head)
+    assert [fields for _, fields in got] == want and all(reject == "" for reject, _ in got)
