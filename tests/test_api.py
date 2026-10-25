@@ -232,3 +232,15 @@ def test_nothing_can_be_written_through_the_api(world, url):
     for method in ("post", "put", "patch", "delete"):
         assert getattr(world, method)(url).status_code == 405
     assert Fitment.objects.count() == 5 and PipelineRun.objects.filter(kind="ingest").count() == 2
+
+
+def test_every_list_endpoint_caps_its_page_at_one_hundred(tmp_path, db_search):
+    rows = [row(f"NB{n:04d}", "", "Gasket", "1.00") for n in range(130)]  # no brand: each one is a review item
+    run_all(get_supplier("s1"), write_csv(tmp_path / "many.csv", rows))
+    client = Client()
+    asked = client.get("/api/review/", {"limit": 100000}).json()
+    assert asked["count"] == 130 and len(asked["results"]) == 100  # the limit is lowered to the ceiling, not honoured
+    assert len(client.get("/api/review/", {"limit": 100}).json()["results"]) == 100
+    assert len(client.get("/api/review/").json()["results"]) == 25  # and the default page stays what it was
+    assert len(client.get("/api/review/", {"limit": 100000, "offset": 100}).json()["results"]) == 30
+    assert len(client.get("/api/feed-runs/", {"limit": 100000}).json()["results"]) <= 100

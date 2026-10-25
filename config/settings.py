@@ -38,7 +38,7 @@ TIME_ZONE = "UTC"
 STATIC_URL = "static/"
 
 REST_FRAMEWORK = {
-    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.LimitOffsetPagination",
+    "DEFAULT_PAGINATION_CLASS": "catalog.api.pagination.CappedLimitOffsetPagination",
     "PAGE_SIZE": 25,
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PERMISSION_CLASSES": [],

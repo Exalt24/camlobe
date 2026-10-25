@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from ..fitment import canon_vehicle_text
 from ..models import Fitment, Part, PartSource, PipelineRun, ReviewItem
 from ..search import dbsearch, index
+from .pagination import MAX_LIMIT
 from .serializers import (
     FeedRunSerializer,
     FitmentPartSerializer,
@@ -18,7 +19,6 @@ from .serializers import (
     ReviewItemSerializer,
 )
 
-MAX_LIMIT = 100
 
 
 def _int_param(request, name: str, default: int, low: int, high: int) -> int:
