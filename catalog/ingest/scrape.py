@@ -37,6 +37,7 @@ import random
 import re
 import time
 from dataclasses import dataclass, field, fields
+from html.parser import HTMLParser
 from http.cookiejar import LWPCookieJar
 from typing import Callable, Iterator, Mapping
 from urllib import robotparser
@@ -120,6 +121,7 @@ class ScrapeConfig:
     challenge_markers: list[str] = field(default_factory=lambda: list(DEFAULT_CHALLENGE_MARKERS))
     max_pages: int = 1000
     timeout: float = 20.0
+    allow_empty: bool = False  # a table with no rows is the end of the data (a supplier that may list nothing), not a fault
 
     def __post_init__(self) -> None:
         for index, url in enumerate(self.proxies):
@@ -162,6 +164,41 @@ class _Transient(Exception):
 
 class _SessionExpired(Exception):
     pass
+
+
+class _TagScan(HTMLParser):
+    """Reads the page's own tags, not the tree a tolerant parser builds from them: lxml closes a table the way a browser does,
+    so a body cut in the middle of a row looks like a whole page once it is parsed. What matters is what the SITE sent."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.open_tables = 0
+        self.html_closed = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.open_tables += 1
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            self.open_tables -= 1
+        elif tag in ("body", "html"):
+            self.html_closed = True
+
+
+@dataclass
+class _Page:
+    soup: BeautifulSoup
+    table: object
+    table_closed: bool  # every <table> the site opened, it closed
+    html_closed: bool  # the page reached its closing body or html tag
+
+
+def _scan(text: str) -> tuple[bool, bool]:
+    scan = _TagScan()
+    scan.feed(text)
+    scan.close()
+    return scan.open_tables <= 0, scan.html_closed
 
 
 def _origin(url: str) -> tuple[str, str]:
@@ -281,11 +318,16 @@ class ScrapeAdapter:
             if len(seen) >= self.cfg.max_pages:
                 raise _Stop("E_TOO_MANY_PAGES", f"more than {self.cfg.max_pages} pages")
             seen.add(url)
-            soup = self._page(url)
+            page = self._page(url)
             self._data_pages += 1
             self._stats["pages"] += 1
-            table = soup.select_one(self.cfg.table_selector)
-            header, rows = self._table(table)
+            soup = page.soup
+            if not page.table_closed:  # nothing is read from a page the site did not finish: its last row may be cut
+                raise _Stop("E_PAGE_TRUNCATED", "the page ends inside its product table, so nothing is read from it")
+            header, rows = self._table(page.table)
+            if not rows and not self.cfg.allow_empty:
+                first = len(seen) == 1  # an empty FIRST page is a failed run; an empty later one is a gap
+                raise _Stop("E_PAGE_EMPTY", "the product table has no rows" + ("; allow_empty says a supplier may list nothing" if first else ""), fatal=first)
             for cells in rows:
                 self._position += 1
                 if self._position <= start_after:
@@ -299,6 +341,8 @@ class ScrapeAdapter:
             url = urljoin(url, nxt["href"]) if nxt is not None and nxt.get("href") else ""
             if url and _origin(url) != _origin(self.cfg.start_url):
                 raise _Stop("E_OFFSITE", "a next link leaves the site")
+            if not page.html_closed:  # a body cut after the table, or inside the next link, is not the site saying the catalog ended
+                raise _Stop("E_PAGE_TRUNCATED", "the page ends before its html does, so the site may have cut it short (its next link too)")
 
     @staticmethod
     def _table(table) -> tuple[list[str], list[list[str]]]:
@@ -315,8 +359,8 @@ class ScrapeAdapter:
                 rows.append([c.get_text(" ", strip=True) for c in cells])
         return header, rows
 
-    def _page(self, url: str) -> BeautifulSoup:
-        """The parsed page at `url`, logging in or in again when the site sends us to its login form."""
+    def _page(self, url: str) -> _Page:
+        """The page at `url`, logging in or in again when the site sends us to its login form."""
         while True:
             try:
                 return self._read_page(url)
@@ -338,16 +382,21 @@ class ScrapeAdapter:
         self._stats["relogins"] += 1
         self._login()
 
-    def _read_page(self, url: str) -> BeautifulSoup:
+    def _read_page(self, url: str) -> _Page:
         response = self._fetch(url)
-        soup = BeautifulSoup(response.text, PARSER)
+        announced = response.headers.get("Content-Length", "")
+        if announced.isdigit() and not response.headers.get("Content-Encoding") and len(response.content) != int(announced):
+            raise _Stop("E_PAGE_TRUNCATED", "the body is not as long as the site said it would be")
+        text = response.text
+        soup = BeautifulSoup(text, PARSER)
         table = soup.select_one(self.cfg.table_selector)
         self._refuse_a_challenge(soup, table)
         if soup.select_one("input[type=password]") is not None:
             raise _SessionExpired()
         if table is None:
             raise _Stop("E_UNEXPECTED_PAGE", "the page has no product table")
-        return soup
+        table_closed, html_closed = _scan(text)
+        return _Page(soup, table, table_closed, html_closed)
 
     def _refuse_a_challenge(self, soup: BeautifulSoup, table=None) -> None:
         """A challenge is looked for everywhere EXCEPT the product table: a product called "Captcha reader" is a product."""

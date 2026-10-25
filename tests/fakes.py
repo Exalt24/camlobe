@@ -571,3 +571,44 @@ class DroppingProxy:
     def close(self):
         self._stop = True
         self.sock.close()
+
+
+# ------------------------------------------------------------------------------------------------
+# A session that serves pages from memory: for the cases a real socket makes slow or awkward (a body cut at any byte).
+# ------------------------------------------------------------------------------------------------
+
+
+class PageSession:
+    """Stands in for requests.Session: `route(url)` answers (status, headers, body bytes). Every request is logged."""
+
+    def __init__(self, route):
+        import requests
+
+        self.route, self.log = route, []
+        self.headers: dict = {}
+        self.cookies = requests.cookies.RequestsCookieJar()
+        self.trust_env = False
+
+    def request(self, method, url, **kwargs):
+        import requests
+
+        self.log.append(url)
+        status, headers, body = self.route(url)
+        response = requests.Response()
+        response.status_code = status
+        response.url = url
+        response._content = body.encode() if isinstance(body, str) else body
+        response.headers.update(headers)
+        response.encoding = None
+        return response
+
+
+def products_table(rows, header=("Part No", "Brand", "Description", "Price"), nxt="", head="", foot="", close=True):
+    """A catalog page as a supplier's site would send it. `close=False` leaves out the closing </body></html>."""
+    th = "".join(f"<th>{h}</th>" for h in header)
+    body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+    end = "</body></html>" if close else ""
+    return (
+        f'<html><head><title>Catalog</title>{head}</head><body><table class="products"><thead><tr>{th}</tr></thead>'
+        f"<tbody>{body}</tbody></table>{nxt}{foot}{end}"
+    )

@@ -433,6 +433,14 @@ MUTANTS: list[Mutant] = [
     D("scrape: the credentials of a proxy are not among the secrets", "scrape", "__init__", "delete the call statement", "userinfo_secrets", SECRETS),
     D("scrape: a proxy port above 65535 is accepted", "scrape", "proxy_problem", "LtE -> Gt (operator 2", "65535", SECRETS),
     D("scrape: a proxy that is not a URL is tried instead of refused", "scrape", "records", "negate the condition", "if self._proxy_problem", SECRETS),
+    # ---- the walk ends as a success only when the site said it ended ----------------------------------------------------------------------
+    D("scrape: a page cut inside its table is read", "scrape", "_walk", "negate the condition", "if not page.table_closed", PAGES),
+    D("scrape: an empty page is the end of the data", "scrape", "_walk", "negate the condition", "if not rows and not self.cfg.allow_empty", PAGES),
+    D("scrape: an empty first page is only a gap", "scrape", "_walk", "Eq", "first = len(seen) == 1", PAGES),
+    D("scrape: a page that never closes its html ends the walk", "scrape", "_walk", "negate the condition", "if not page.html_closed", PAGES),
+    D("scrape: a body shorter than its announced length is read", "scrape", "_read_page", "negate the condition", "announced.isdigit()", PAGES),
+    D("scrape: an unclosed table is counted as closed", "scrape", "_scan", "LtE", "open_tables <= 0", PAGES),
+    D("scrape: the closing of a table is not noticed", "scrape", "handle_endtag", "negate the condition", 'tag == "table"', PAGES),
 ]
 
 
