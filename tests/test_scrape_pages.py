@@ -616,3 +616,111 @@ def test_a_cut_that_heals_on_the_retry_is_read_as_if_nothing_had_happened():
     adapter, session = adapter_raising(requests.exceptions.ChunkedEncodingError("cut"), page=2, times=1)
     out = records(adapter)
     assert codes(out) == [] and len(rows(out)) == 6 and adapter.notes()["retries"] == 1
+
+
+# ---- F4: a link is resolved against the address the page was served from --------------------------------------------------------
+
+
+def redirecting(pages, next_href="page/2/"):
+    """/parts answers a trailing slash redirect, /parts/ is page 1 with a RELATIVE next link, /parts/page/2/ is page 2."""
+    seen = []
+
+    def route(url):
+        seen.append(url)
+        path = url.replace(BASE, "")
+        if path == "/parts":
+            return 301, {"Location": "/parts/"}, ""
+        if path == "/parts/":
+            return 200, {}, products_table([part(1), part(2)], nxt=f'<a rel="next" href="{next_href}">Next</a>' if pages > 1 else "")
+        if path == "/parts/page/2/":
+            return 200, {}, products_table([part(3), part(4)])
+        return 404, {}, "<html><body>no</body></html>"
+
+    return route, seen
+
+
+def test_a_relative_next_link_after_a_trailing_slash_redirect_is_resolved_against_the_address_served():
+    route, seen = redirecting(2)
+    out = records(adapter_for(route, start_url=f"{BASE}/parts"))
+    assert codes(out) == [] and len(rows(out)) == 4
+    assert [u.replace(BASE, "") for u in seen] == ["/parts", "/parts/", "/parts/page/2/"]
+
+
+def test_a_next_link_back_to_the_page_served_after_a_redirect_is_the_page_itself_and_ends_the_walk():
+    """The same page under both of its addresses: /parts redirected to /parts/, and the pager's last link names either one."""
+    for href in ("/parts/", "/parts", ""):
+        route, _ = redirecting(2, next_href=href)
+        out = records(adapter_for(route, start_url=f"{BASE}/parts"))
+        assert codes(out) == [] and len(rows(out)) == 2, href
+
+
+@pytest.mark.parametrize("back", ["/parts", "/parts/"])
+def test_the_walk_notices_a_loop_through_a_redirect_by_either_name_of_the_first_page(back):
+    def route(url):
+        path = url.replace(BASE, "")
+        if path == "/parts":
+            return 301, {"Location": "/parts/"}, ""
+        if path == "/parts/":
+            return 200, {}, products_table([part(1)], nxt='<a rel="next" href="/parts/two/">Next</a>')
+        if path == "/parts/two/":
+            return 200, {}, products_table([part(2)], nxt=f'<a rel="next" href="{back}">Next</a>')  # back to the first page
+        return 404, {}, ""
+
+    out = records(adapter_for(route, start_url=f"{BASE}/parts"))
+    assert codes(out) == ["E_PAGE_LOOP"] and len(rows(out)) == 2  # the first page is not read a second time
+
+
+def test_a_redirect_that_lands_on_another_site_is_still_refused_and_a_next_link_there_too():
+    def route(url):
+        return 301, {"Location": "http://other.test/parts/"}, ""
+
+    assert codes(records(adapter_for(route, start_url=f"{BASE}/parts"))) == ["E_OFFSITE"]
+
+
+def based(base_tags, served="/parts/", next_href="page/2/"):
+    """A page at `served` whose head holds `base_tags`; page 2 lives wherever the base says, under its own name."""
+    seen = []
+
+    def route(url):
+        seen.append(url.replace(BASE, ""))
+        path = url.replace(BASE, "")
+        if path == served:
+            return 200, {}, products_table([part(1), part(2)], head=base_tags, nxt=f'<a rel="next" href="{next_href}">Next</a>')
+        if path.endswith("/page/2/"):
+            return 200, {}, products_table([part(3), part(4)])
+        return 404, {}, "<html><body>no</body></html>"
+
+    return route, seen
+
+
+@pytest.mark.parametrize(
+    "tags, second",
+    [
+        ('<base href="/shop/">', "/shop/page/2/"),
+        ('<base href="/shop/"><base href="/other/">', "/shop/page/2/"),  # the first one wins, the rest are ignored
+        ('<base target="_blank"><base href="/shop/">', "/shop/page/2/"),  # a base with no href does not count
+        ("", "/parts/page/2/"),  # no base: the address the page was served from
+        ('<base href="sub/">', "/parts/sub/page/2/"),  # a relative base is resolved against the page
+    ],
+)
+def test_a_base_element_with_an_href_is_the_base_of_the_next_link_and_the_first_one_wins(tags, second):
+    route, seen = based(tags)
+    out = records(adapter_for(route, start_url=f"{BASE}/parts/"))
+    assert codes(out) == [] and len(rows(out)) == 4 and seen == ["/parts/", second]
+
+
+def test_a_base_element_after_a_redirect_is_resolved_against_the_address_served():
+    seen = []
+
+    def route(url):
+        path = url.replace(BASE, "")
+        seen.append(path)
+        if path == "/parts":
+            return 301, {"Location": "/parts/"}, ""
+        if path == "/parts/":
+            return 200, {}, products_table([part(1)], head='<base href="more/">', nxt='<a rel="next" href="page/2/">Next</a>')
+        if path == "/parts/more/page/2/":
+            return 200, {}, products_table([part(2)])
+        return 404, {}, ""
+
+    assert codes(records(adapter_for(route, start_url=f"{BASE}/parts"))) == [] and seen[-1] == "/parts/more/page/2/"

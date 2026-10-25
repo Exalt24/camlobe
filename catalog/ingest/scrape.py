@@ -244,6 +244,7 @@ class _TagScan(HTMLParser):
 
 @dataclass
 class _Page:
+    url: str  # the address the page was served from (after the redirects), not the one asked for
     soup: BeautifulSoup
     table: object
     table_closed: bool  # every <table> the site opened, it closed
@@ -372,14 +373,20 @@ class ScrapeAdapter:
     def _walk(self) -> Iterator[SourceRecord]:
         if self.cfg.respect_robots:
             self._read_robots()
-        url, seen = urldefrag(self.cfg.start_url)[0], set()  # a fragment is never sent and never tells two pages apart
+        url, seen, pages = urldefrag(self.cfg.start_url)[0], set(), 0  # a fragment is never sent and never tells two pages apart
         while url:
             if url in seen:
                 raise _Stop("E_PAGE_LOOP", "a next link leads back to a page already read")
-            if len(seen) >= self.cfg.max_pages:
+            if pages >= self.cfg.max_pages:
                 raise _Stop("E_TOO_MANY_PAGES", f"more than {self.cfg.max_pages} pages")
             seen.add(url)
             page = self._page(url)
+            served = urldefrag(page.url)[0]  # where a redirect landed: the base of the page's links, and a second name for it
+            if served != url:
+                if served in seen:
+                    raise _Stop("E_PAGE_LOOP", "a next link leads back to a page already read")
+                seen.add(served)
+            pages += 1
             self._data_pages += 1
             self._stats["pages"] += 1
             soup = page.soup
@@ -387,7 +394,7 @@ class ScrapeAdapter:
                 raise _Stop("E_PAGE_TRUNCATED", "the page ends inside its product table, so nothing is read from it")
             header, rows = self._table(page.table)
             if not rows and not self.cfg.allow_empty:
-                first = len(seen) == 1  # an empty FIRST page is a failed run; an empty later one is a gap
+                first = pages == 1  # an empty FIRST page is a failed run; an empty later one is a gap
                 raise _Stop("E_PAGE_EMPTY", "the product table has no rows" + ("; allow_empty says a supplier may list nothing" if first else ""), fatal=first)
             for cells in rows:
                 self._position += 1
@@ -396,24 +403,30 @@ class ScrapeAdapter:
                     yield SourceRecord(self._position, {}, raw, reject="column_count")
                 else:
                     yield SourceRecord(self._position, dict(zip(header, cells)), raw)
-            url = self._next_url(soup, url)
+            url = self._next_url(soup, served, asked=url)
             if url and _origin(url) != _origin(self.cfg.start_url):
                 raise _Stop("E_OFFSITE", "a next link leaves the site")
             if not page.html_closed:  # a body cut after the table, or inside the next link, is not the site saying the catalog ended
                 raise _Stop("E_PAGE_TRUNCATED", "the page ends before its html does, so the site may have cut it short (its next link too)")
 
-    def _next_url(self, soup: BeautifulSoup, current: str) -> str:
+    def _next_url(self, soup: BeautifulSoup, current: str, asked: str = "") -> str:
         """The URL of the next page, or "" when the page has none. A link that is not a page is "no next page": an empty
         href, `#`, `javascript:`, a link the site marks disabled (the class or aria-disabled of the last page's pager), and
-        a link back to the page itself. A link to a DIFFERENT page already read is not excused here: the walk calls it a loop."""
+        a link back to the page itself (by the address it was served from or the one asked for). A link to a DIFFERENT page already
+        read is not excused here: the walk calls it a loop. A relative link is resolved against `current`, the address the page was
+        SERVED from (after a trailing slash redirect that is not the address that was asked for), or against the page's first
+        `<base href>` when it has one, which is itself resolved against that address."""
         link = soup.select_one(self.cfg.next_selector)
         if link is None:
             return ""
         href = (link.get("href") or "").strip()
         if not href or href.startswith("#") or href.lower().startswith("javascript:") or self._says_disabled(link):
             return ""
-        target = urldefrag(urljoin(current, href))[0]
-        return "" if target == urldefrag(current)[0] else target
+        base_tag = soup.select_one("base[href]")  # the FIRST base element with an href is the document base, the rest are ignored
+        base = urljoin(current, base_tag["href"].strip()) if base_tag is not None else current
+        target = urldefrag(urljoin(base, href))[0]
+        itself = {urldefrag(current)[0]} | ({urldefrag(asked)[0]} if asked else set())  # the page has two names after a redirect
+        return "" if target in itself else target
 
     @staticmethod
     def _says_disabled(link) -> bool:
@@ -468,7 +481,7 @@ class ScrapeAdapter:
         self._login()
 
     def _read_page(self, url: str) -> _Page:
-        response = self._fetch(url)
+        response, url = self._fetch(url)
         announced = response.headers.get("Content-Length", "")
         if announced.isdigit() and not response.headers.get("Content-Encoding") and len(response.content) != int(announced):
             raise _Stop("E_PAGE_TRUNCATED", "the body is not as long as the site said it would be")
@@ -481,7 +494,7 @@ class ScrapeAdapter:
         if table is None:
             raise _Stop("E_UNEXPECTED_PAGE", "the page has no product table")
         table_closed, html_closed = _scan(text)
-        return _Page(soup, table, table_closed, html_closed)
+        return _Page(url, soup, table, table_closed, html_closed)
 
     def _refuse_a_challenge(self, soup: BeautifulSoup, table=None) -> None:
         """A challenge is looked for everywhere EXCEPT the product table: a product called "Captcha reader" is a product."""
@@ -494,7 +507,7 @@ class ScrapeAdapter:
     # ---- login -------------------------------------------------------------------------------------
 
     def _login(self) -> None:
-        response = self._fetch(self.cfg.login_url, login_page=True)
+        response, _ = self._fetch(self.cfg.login_url, login_page=True)
         soup = BeautifulSoup(self._decode(response), PARSER)
         self._refuse_a_challenge(soup)
         password_input = soup.select_one("input[type=password]")
@@ -528,8 +541,9 @@ class ScrapeAdapter:
 
     # ---- requests ----------------------------------------------------------------------------------
 
-    def _fetch(self, url: str, login_page: bool = False) -> requests.Response:
-        """GET `url`, following redirects by hand: same site only, a redirect to the login form is an expired session."""
+    def _fetch(self, url: str, login_page: bool = False) -> tuple[requests.Response, str]:
+        """GET `url`, following redirects by hand: same site only, a redirect to the login form is an expired session.
+        Returns the response and the address it was served from."""
         for _ in range(MAX_REDIRECT_HOPS + 1):
             response = self._request("GET", url)
             if response.status_code in REDIRECT_STATUSES:
@@ -544,7 +558,7 @@ class ScrapeAdapter:
                 raise _SessionExpired()
             if response.status_code >= 400:
                 raise _Stop(f"E_HTTP_{response.status_code}", f"HTTP {response.status_code} for a page")
-            return response
+            return response, url
         raise _Stop("E_REDIRECT_LOOP", "too many redirects")
 
     def _request(self, method: str, url: str, data: dict | None = None) -> requests.Response:

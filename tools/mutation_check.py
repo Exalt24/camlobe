@@ -418,7 +418,7 @@ MUTANTS: list[Mutant] = [
     M("scrape: a redirect to another site is followed", "scrape", '                if _origin(target) != _origin(self.cfg.start_url):\n                    raise _Stop("E_OFFSITE", "the site redirected', '                if False:\n                    raise _Stop("E_OFFSITE", "the site redirected', SCRAPE),
     M("scrape: a next link to another site is followed", "scrape", "            if url and _origin(url) != _origin(self.cfg.start_url):", "            if False:", SCRAPE),
     M("scrape: a next link that loops is followed for ever", "scrape", "            if url in seen:\n", "            if False:\n", SCRAPE, timeout=60),
-    M("scrape: there is no page limit", "scrape", "if len(seen) >= self.cfg.max_pages:", "if False:", SCRAPE),
+    D("scrape: there is no page limit", "scrape", "_walk", "negate the condition", "if pages >= self.cfg.max_pages", SCRAPE),
     M("scrape: a dead proxy is asked again every time", "scrape", "                self._dead.add(index)  # this proxy refused or dropped the connection: the next one carries the request\n", "", SCRAPE),
     M("scrape: a proxy that fails ends the request", "scrape", '                self._stats["proxy_failovers"] += 1\n                continue\n', '                raise _Transient("E_PROXY_UNAVAILABLE", "x")\n', SCRAPE),
     M("scrape: when every proxy fails the request goes direct", "scrape", '        raise _Transient("E_PROXY_UNAVAILABLE", "every proxy refused the connection")', "        return self.session.request(method, url, **kwargs)", SCRAPE),
@@ -437,7 +437,7 @@ MUTANTS: list[Mutant] = [
     # ---- the walk ends as a success only when the site said it ended ----------------------------------------------------------------------
     D("scrape: a page cut inside its table is read", "scrape", "_walk", "negate the condition", "if not page.table_closed", PAGES),
     D("scrape: an empty page is the end of the data", "scrape", "_walk", "negate the condition", "if not rows and not self.cfg.allow_empty", PAGES),
-    D("scrape: an empty first page is only a gap", "scrape", "_walk", "Eq", "first = len(seen) == 1", PAGES),
+    D("scrape: an empty first page is only a gap", "scrape", "_walk", "Eq", "first = pages == 1", PAGES),
     D("scrape: a page that never closes its html ends the walk", "scrape", "_walk", "negate the condition", "if not page.html_closed", PAGES),
     D("scrape: a body shorter than its announced length is read", "scrape", "_read_page", "negate the condition", "announced.isdigit()", PAGES),
     D("scrape: an unclosed table is counted as closed", "scrape", "_scan", "LtE", "open_tables <= 0", PAGES),
@@ -453,7 +453,7 @@ MUTANTS: list[Mutant] = [
     D("scrape: a latin-1 page with an undefined windows-1252 byte is refused", "scrape", "decode_page", "negate the condition", "if codec in _LATIN_ONE:", PAGES),
     # ---- a next link that is not a page is the end of the walk ------------------------------------------------------------------------------
     D("scrape: an empty, # or javascript: next link is followed", "scrape", "_next_url", "negate the condition", "if not href", PAGES),
-    D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if target ==', PAGES),
+    D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if target in itself', PAGES),
     D("scrape: a next link marked disabled is followed", "scrape", "_says_disabled", "and <-> or", 'any("disabled"', PAGES),
     # ---- the same class in the REST adapter: a JSON answer is read as bytes ------------------------------------------------------------------
     D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
@@ -470,6 +470,11 @@ MUTANTS: list[Mutant] = [
     D("transport: a configuration error is not told from a transient one", "transport", "classify", "negate the condition", "isinstance(exc, CONFIG_ERRORS)", PAGES, REMOTE),
     D("transport: a body cut after the headers is not E_PAGE_TRUNCATED", "transport", "classify", "negate the condition", "rx.ChunkedEncodingError", PAGES),
     D("transport: a body that does not decode is not E_PAGE_ENCODING", "transport", "classify", "negate the condition", "rx.ContentDecodingError", PAGES),
+    # F4: a link is resolved against the address the page was served from, or its base element
+    D("scrape: a redirect's landing address is not told from the one asked for", "scrape", "_walk", "negate the condition", "if served != url", PAGES),
+    D("scrape: a page read under its second address is read again", "scrape", "_walk", "delete the call statement", "seen.add(served)", PAGES),
+    D("scrape: a next link back to the page served is followed", "scrape", "_next_url", "In -> NotIn", 'return "" if target in itself', PAGES),
+    D("scrape: a base element is not the base of a link", "scrape", "_next_url", "negate the condition", "if base_tag is not None", PAGES),
 ]
 
 
