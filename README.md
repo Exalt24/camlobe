@@ -54,7 +54,7 @@ Windows 11 desktop, Docker Postgres 17 on localhost, one process. Counts and tim
 
 | Run | Raw rows | Parts | Listed by 2 or more suppliers | Review queue | Ingest per file | Normalise | Match |
 |---|---|---|---|---|---|---|---|
-| 20,000 parts ([output](docs/test-runs/2026-10-25-run-demo-20k.txt)) | 40,008 | 19,098 | 14,106 | 500 | 1.1 to 2.0 s | 3.3 s | 11.0 s |
+| 20,000 parts ([output](docs/test-runs/2026-10-25-run-demo-20k.txt), same counts again after two fixes: [output](docs/test-runs/2026-10-26-run-demo-20k.txt)) | 40,008 | 19,098 | 14,106 | 500 | 1.1 to 2.0 s | 3.3 s | 11.0 s |
 | 100,000 parts ([output](docs/test-runs/2026-10-25-run-demo-100k.txt)) | 199,886 | 95,345 | 70,468 | 2,518 | 5.2 to 11.4 s | 20.0 s | 65.7 s |
 
 `python manage.py check_query_plans` runs `EXPLAIN ANALYZE` on the queries the pipeline and API depend on and fails when one stops using its index. At 20,000 parts the eight checked queries each took under 3 ms. It also found two real problems while it was being written: Django had generated a partial index on the barcode with a predicate Postgres could not use, and a second index on the part number duplicated the one that serves both equality and prefix search.

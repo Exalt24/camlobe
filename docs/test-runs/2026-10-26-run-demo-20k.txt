@@ -1,0 +1,74 @@
+1. invented feeds, 20000 canonical parts, seed 7
+     0.3 s  write feeds
+         redline_catalog.csv: 14666 rows
+         harbor_catalog.xml: 12025 rows
+         delta_2026-10-01.csv: 12912 rows
+         delta_2026-10-15.csv: 12912 rows
+         delta_2026-10-22.csv: 12912 rows
+         delta_2026-10-29_unmapped.csv: 200 rows
+         fitment_aces.csv: 15741 rows
+
+2. pass 1: ingest, normalize, match
+     2.0 s  ingest redline_catalog.csv
+         succeeded: read=14666 stored=14029 unchanged=424 rejected=213
+     1.8 s  ingest harbor_catalog.xml
+         succeeded: read=12025 stored=12025 unchanged=0 rejected=0
+     1.8 s  ingest delta_2026-10-01.csv
+         succeeded: read=12912 stored=12912 unchanged=0 rejected=0
+     1.4 s  ingest delta_2026-10-15.csv
+         succeeded: read=12912 stored=658 unchanged=12254 rejected=0
+     1.0 s  ingest delta_2026-10-22.csv
+         succeeded: read=12912 stored=384 unchanged=12528 rejected=0
+     0.0 s  ingest delta_2026-10-29_unmapped.csv
+         failed: read=0 stored=0 unchanged=0 rejected=0  error: SchemaDriftError: no column maps to brand; the feed has desc, ean, item_number, producer, 
+     3.1 s  normalize
+    10.3 s  match
+         normalized 40008, matched or created 38334, refreshed 1174, queued for review 500
+
+3. pass 2: ingest, normalize, match  (everything again: nothing should change)
+     0.0 s  ingest redline_catalog.csv
+         succeeded: read=0 stored=0 unchanged=0 rejected=0  (source unchanged)
+     0.0 s  ingest harbor_catalog.xml
+         succeeded: read=0 stored=0 unchanged=0 rejected=0  (source unchanged)
+     0.0 s  ingest delta_2026-10-01.csv
+         succeeded: read=0 stored=0 unchanged=0 rejected=0  (source unchanged)
+     0.0 s  ingest delta_2026-10-15.csv
+         succeeded: read=0 stored=0 unchanged=0 rejected=0  (source unchanged)
+     0.0 s  ingest delta_2026-10-22.csv
+         succeeded: read=0 stored=0 unchanged=0 rejected=0  (source unchanged)
+     0.0 s  ingest delta_2026-10-29_unmapped.csv
+         failed: read=0 stored=0 unchanged=0 rejected=0  error: SchemaDriftError: no column maps to brand; the feed has desc, ean, item_number, producer, 
+     0.0 s  normalize
+     0.0 s  match
+         normalized 0, matched or created 0, refreshed 0, queued for review 0
+
+4. fitment
+     1.1 s  load fitment_aces.csv
+         read=15741 new=15029 rejected=685
+         the same file again: new=0 already_there=15056
+
+5. query plans
+     0.5 s  EXPLAIN ANALYZE on the hot queries
+         ok      0.74 ms  match: parts by number
+         ok      0.79 ms  match: parts by gtin
+         ok      0.08 ms  match: pending queue
+         ok      0.89 ms  ingest: latest raw row per part number
+         ok      0.01 ms  api: search by part number prefix
+         ok      0.45 ms  search: parts not yet indexed
+         ok      0.02 ms  review queue
+         ok      0.32 ms  api: fitment for a vehicle
+
+6. search index
+index rebuild run 19 succeeded: parts_read=19098 documents_sent=19098
+index sync run 20 succeeded: parts_read=0 documents_sent=0
+
+SUMMARY
+  raw rows (as received, append only): 40008
+  rejected rows with a reason:         1583
+  canonical parts:                     19098
+  supplier listings linked:            38334
+  parts listed by 2 or more suppliers: 14106
+  waiting in the review queue:         500
+  fitment rows:                        15029
+  pipeline runs recorded:              20
+  normalized rows still pending match: 0
