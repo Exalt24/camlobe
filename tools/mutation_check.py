@@ -81,6 +81,7 @@ TARGETS = {
     "scrape": ROOT / "catalog" / "ingest" / "scrape.py",
     "redact": ROOT / "catalog" / "ingest" / "redact.py",
     "transport": ROOT / "catalog" / "ingest" / "transport.py",
+    "requirements": ROOT / "requirements.txt",
     "pagination": ROOT / "catalog" / "api" / "pagination.py",
 }
 
@@ -496,6 +497,8 @@ MUTANTS: list[Mutant] = [
     D("rest: a Retry-After date is added to now instead of taken from it", "rest", "_retry_after", "Sub -> Add", "when.timestamp()", REMOTE),
     D("rest: a Retry-After date of an unknown zone is read as local time", "rest", "_retry_after", "negate the condition", "if when.tzinfo is None", REMOTE),
     D("soap: the Retry-After of a throttled answer is not remembered", "soap", "post", "negate the condition", "response.status_code >= 429", REMOTE),
+    # F10: a proxy scheme the config accepts needs its dependency (requirements.txt is not Python: the one guard that is a text pair)
+    M("requirements: the SOCKS support of requests is not installed", "requirements", "requests[socks]>=2.32,<3", "requests>=2.32,<3", SCRAPE),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]

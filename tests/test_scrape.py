@@ -5,8 +5,10 @@ Every guard has a test in both directions: the case it must stop and the near mi
 import json
 import logging
 import random
+from pathlib import Path
 
 import pytest
+import requests
 from bs4 import BeautifulSoup
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -20,6 +22,8 @@ from .fakes import DroppingProxy, ForwardProxy, ScrapeSite, dead_proxy_url, shop
 from .helpers import get_supplier
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+ROOT = Path(__file__).resolve().parents[1]
 
 USER, PASSWORD = "buyer", "s3cret pass 42"
 ENV = {"SHOP_USER": USER, "SHOP_PASS": PASSWORD}
@@ -597,3 +601,58 @@ def test_random_sites_are_read_exactly_or_stopped_with_a_prefix_and_a_code(seed,
             assert all(e["via"] is None for e in site.log)
     finally:
         site.close()
+
+
+# ---- second output round: every proxy scheme the config accepts must work (SOCKS needs PySocks, which requirements.txt names) ---------
+
+
+def socks_url():
+    return dead_proxy_url().replace("http://", "socks5h://")
+
+
+@pytest.mark.parametrize("scheme", ["http", "https", "socks5", "socks5h"])
+def test_every_proxy_scheme_the_config_accepts_builds_a_session_adapter_in_this_environment(scheme):
+    """The class: an accepted setting that needs a dependency the project does not install. `requests` builds the proxy manager
+    of a socks scheme only when PySocks is importable, and fails with InvalidSchema otherwise."""
+    from requests.adapters import HTTPAdapter
+
+    from catalog.ingest.scrape import PROXY_SCHEMES
+
+    assert scheme in PROXY_SCHEMES
+    HTTPAdapter().proxy_manager_for(f"{scheme}://127.0.0.1:1080")
+
+
+def test_requirements_name_the_socks_extra_of_requests():
+    text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    assert any(line.startswith("requests[socks]") for line in text.splitlines())
+
+
+def test_a_dead_socks5h_proxy_is_skipped_for_the_next_one_like_any_proxy_that_refuses(sites, proxies):
+    site, live = sites(), proxies()
+    adapter = make_adapter(site, proxies=[socks_url(), live.url])
+    assert numbers(read(adapter)) == EVERY_PART
+    assert adapter.notes()["proxy_failovers"] == 1 and adapter.notes()["proxy"] == 1 and len(proxy_passed(live)) == len(site.log)
+
+
+def test_when_the_only_proxy_is_a_dead_socks5h_one_the_run_ends_as_a_coded_gap_and_nothing_goes_direct(sites):
+    site = sites()
+    out = read(make_adapter(site, proxies=[socks_url()], max_retries=1))
+    assert [g.message.split(":")[0] for g in gaps(out)] == ["E_PROXY_UNAVAILABLE"] and rows(out) == [] and site.log == []
+
+
+def test_a_missing_optional_dependency_is_a_fixed_phrase_failure_and_never_a_stored_traceback(sites, monkeypatch):
+    from requests.adapters import HTTPAdapter
+
+    def missing(self, proxy, **kwargs):
+        raise requests.exceptions.InvalidSchema("Missing dependencies for SOCKS support. proxy=socks5h://u:Sup3rS3cret@h:1")
+
+    monkeypatch.setattr(HTTPAdapter, "proxy_manager_for", missing)
+    site = sites()
+    run = ingest(get_supplier("nosocks"), make_adapter(site, proxies=[socks_url()], max_retries=1))
+    assert run.status == PipelineRun.Status.FAILED
+    assert run.errors[0]["message"].endswith("E_REQUEST_INVALID: " + __import__("catalog.ingest.transport", fromlist=["x"]).CONFIG_PHRASE)
+    assert "Sup3rS3cret" not in json.dumps(run.errors) and "Traceback" not in json.dumps(run.errors)
+
+
+def proxy_passed(proxy):
+    return proxy.passed
