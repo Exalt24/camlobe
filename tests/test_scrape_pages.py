@@ -214,3 +214,47 @@ def test_complete_pages_of_every_ordinary_shape_are_a_success():
         assert codes(out) == [] and len(rows(out)) == n, (n, per, style, codes(out))
         done += 1
     assert done == 25
+
+
+# ---- F3: a resume never skips rows by position over a source whose order can change ----------------------------------
+
+
+def test_the_scraper_ignores_the_position_it_is_asked_to_resume_after_and_reads_from_the_first_page():
+    adapter = adapter_for(catalog(7))
+    out = list(adapter.records(start_after=4))
+    assert [r.position for r in rows(out)] == list(range(1, 8)) and adapter.resumable is False
+
+
+def test_a_resume_after_a_partial_run_over_a_site_that_moved_misses_nothing():
+    """Part 1 was withdrawn between the runs, so every later part moved up one place: a skip by position would never read part 4."""
+    supplier = snapshot_supplier("moved")
+    state = {"parts": list(range(1, 10)), "blocked": False}
+
+    def route(url):
+        page = int(url.rsplit("page=", 1)[1])
+        if page == 2 and state["blocked"]:
+            return 403, {}, "no"
+        parts = state["parts"]
+        chunk = [part(i) for i in parts[(page - 1) * 3 : page * 3]]
+        nxt = f'<a rel="next" href="/catalog?page={page + 1}">Next</a>' if page * 3 < len(parts) else ""
+        return 200, {}, products_table(chunk, nxt=nxt)
+
+    ingest(supplier, adapter_for(route))
+    normalize_pending()
+    match_pending()
+    state["blocked"] = True
+    assert ingest(supplier, adapter_for(route)).status == PipelineRun.Status.PARTIAL
+    state["blocked"], state["parts"] = False, list(range(2, 10))
+    run = ingest(supplier, adapter_for(route))
+    assert run.status == PipelineRun.Status.SUCCEEDED and "resumed_from" not in run.notes
+    live = sorted(PartSource.objects.filter(supplier=supplier, delisted_at__isnull=True).values_list("supplier_part_number", flat=True))
+    assert live == sorted(part(i)[0] for i in range(2, 10))  # all eight still offered are still listed; only part 1 is gone
+    assert run.notes["snapshot"]["delisted"] == 1
+
+
+def test_a_partial_run_leaves_the_checkpoint_where_the_next_run_starts_over_not_where_it_stopped():
+    supplier = get_supplier("again")
+    ingest(supplier, adapter_for(catalog(9, overrides={2: (403, {}, "no")})))
+    assert FeedCheckpoint.objects.get().position == 3
+    run = ingest(supplier, adapter_for(catalog(9)))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_read == 9 and FeedCheckpoint.objects.get().position == 9

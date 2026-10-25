@@ -213,7 +213,7 @@ MUTANTS: list[Mutant] = [
     # ---- the ingest runner -----------------------------------------------------------------------------
     M("runner: the checkpoint never advances", "runner", "FeedCheckpoint.objects.filter(pk=checkpoint.pk).update(position=advance_to, last_run=run)", "pass", INGEST),
     M("runner: a complete source is read again", "runner", "elif checkpoint.completed:", "elif False:", INGEST),
-    M("runner: changed content does not restart the checkpoint", "runner", "if checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):", "if False:", INGEST),
+    M("runner: changed content does not restart the checkpoint", "runner", "if restart or checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):", "if False:", INGEST),
     M("runner: an unchanged row is stored again", "runner", " or latest.get((row.part_number, row.brand)) == chash", "", INGEST),
     M("runner: the unchanged check ignores the brand", "runner",
       '.order_by("part_number_raw", "brand_raw", "-id")\n            .distinct("part_number_raw", "brand_raw")',
@@ -441,6 +441,8 @@ MUTANTS: list[Mutant] = [
     D("scrape: a body shorter than its announced length is read", "scrape", "_read_page", "negate the condition", "announced.isdigit()", PAGES),
     D("scrape: an unclosed table is counted as closed", "scrape", "_scan", "LtE", "open_tables <= 0", PAGES),
     D("scrape: the closing of a table is not noticed", "scrape", "handle_endtag", "negate the condition", 'tag == "table"', PAGES),
+    # ---- a resume never skips by position over a source whose order can change -------------------------------------------------------------
+    D("runner: a source that cannot be resumed by position is resumed by position", "runner", "_ingest_locked", "remove `not`", "restart = not getattr", PAGES),
 ]
 
 

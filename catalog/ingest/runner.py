@@ -66,7 +66,10 @@ def _ingest_locked(
     checkpoint, _ = FeedCheckpoint.objects.get_or_create(supplier=supplier, source_ref=adapter.source_ref)
     fingerprint = adapter.fingerprint()
     run.notes["fingerprint"] = fingerprint
-    if checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):
+    # a source whose order can change between two runs (a live site) is never resumed by position: row N of the earlier run
+    # is not row N now, and skipping N rows would skip rows the site still offers (see ScrapeAdapter.resumable)
+    restart = not getattr(adapter, "resumable", True)
+    if restart or checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):
         # new content (or a live source, which has no identity to compare): read it from the start
         checkpoint.fingerprint = fingerprint
         checkpoint.position = 0

@@ -131,9 +131,9 @@ def test_the_rows_go_through_the_runner_and_the_header_mapping(sites):
     assert (raw.brand_raw, raw.cost_cents, raw.description_raw) == ("Marlow", 400, "Oil filter 3")
 
 
-def test_a_resume_reads_the_pages_again_and_skips_the_rows_already_stored(sites):
+def test_a_resume_reads_every_page_again_from_the_first_and_never_skips_rows_by_position(sites):
     out = read(make_adapter(sites()), start=4)
-    assert [r.position for r in rows(out)] == [5, 6, 7] and numbers(out) == EVERY_PART[4:]
+    assert [r.position for r in rows(out)] == [1, 2, 3, 4, 5, 6, 7] and numbers(out) == EVERY_PART
 
 
 def test_a_site_that_needs_no_login_is_read_without_one(sites):

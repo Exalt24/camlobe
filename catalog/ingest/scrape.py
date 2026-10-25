@@ -290,14 +290,19 @@ class ScrapeAdapter:
     def cleanup(self) -> None:
         self._save_jar()
 
+    # The order of a live site can change between two runs (a part is withdrawn, a price re-sorts the list), so row N of the
+    # earlier run is not row N now. The adapter therefore never resumes by position: every run walks from the first page, and
+    # what it already stored is not stored again (a row's key and "unchanged since the latest stored version" see to that).
+    resumable = False
+
     def records(self, start_after: int = 0) -> Iterator[SourceRecord | SourceGap]:
-        """Rows with position > start_after. A site has no random access, so a resume reads the pages again and skips."""
+        """Every row of the site from its first page. `start_after` is accepted for the interface and ignored (see `resumable`)."""
         self._position = 0
         try:
             if self._proxy_problem:
                 raise _Stop("E_PROXY_URL", self._proxy_problem, fatal=True)
             self._load_jar()
-            yield from self._walk(start_after)
+            yield from self._walk()
         except _Stop as stop:
             self._stats["stopped"] = stop.code
             if stop.fatal:
@@ -308,7 +313,7 @@ class ScrapeAdapter:
 
     # ---- walking -----------------------------------------------------------------------------------
 
-    def _walk(self, start_after: int) -> Iterator[SourceRecord]:
+    def _walk(self) -> Iterator[SourceRecord]:
         if self.cfg.respect_robots:
             self._read_robots()
         url, seen = self.cfg.start_url, set()
@@ -330,8 +335,6 @@ class ScrapeAdapter:
                 raise _Stop("E_PAGE_EMPTY", "the product table has no rows" + ("; allow_empty says a supplier may list nothing" if first else ""), fatal=first)
             for cells in rows:
                 self._position += 1
-                if self._position <= start_after:
-                    continue
                 raw = " | ".join(cells)[:2000]
                 if len(cells) != len(header):
                     yield SourceRecord(self._position, {}, raw, reject="column_count")
