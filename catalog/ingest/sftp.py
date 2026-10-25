@@ -117,6 +117,9 @@ class SftpAdapter:
         finally:
             transport.close()
 
+    def secret_values(self) -> list[str]:
+        return [self.password] if self.password else []
+
     def cleanup(self) -> None:
         if self._tmp is not None:
             self._tmp.cleanup()

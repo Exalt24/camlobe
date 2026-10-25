@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field, fields
 from http.cookiejar import LWPCookieJar
@@ -45,6 +46,8 @@ import requests
 from bs4 import BeautifulSoup
 
 from .adapters import SourceGap, SourceRecord
+from .paged import FatalError
+from .redact import identity_url, query_values, userinfo_secrets
 from .rest import _retry_after
 
 DEFAULT_USER_AGENT = "camlobe-feed/1.0 (supplier catalog ingest)"
@@ -65,8 +68,32 @@ REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 MAX_REDIRECT_HOPS = 3
 
 
+PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
+_PROXY_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
+_PROXY_HOST = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::(?P<port>[^:]*))?")
+
+
 class ScrapeConfigError(ValueError):
     """The config cannot be used. The message names the setting or the environment variable, never a value."""
+
+
+def proxy_problem(url: str) -> str:
+    """Why `url` is not a usable proxy URL, or "". The answer is a fixed phrase: a proxy URL may carry a password, and
+    what is wrong with it must never be said by quoting a part of it."""
+    scheme, sep, rest = url.partition("://")
+    if not sep or not _PROXY_SCHEME.fullmatch(scheme):
+        return "it has no scheme such as http://"
+    if scheme.lower() not in PROXY_SCHEMES:
+        return "its scheme is not one of http, https, socks5, socks5h"
+    authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
+    hostport = authority.rsplit("@", 1)[-1]
+    match = _PROXY_HOST.fullmatch(hostport)
+    if not hostport or match is None:
+        return "its host is missing or not valid"
+    port = match.group("port")
+    if port is not None and not (port.isascii() and port.isdigit() and 1 <= int(port) <= 65535):
+        return "its port is not a number from 1 to 65535"
+    return ""
 
 
 @dataclass
@@ -94,6 +121,12 @@ class ScrapeConfig:
     max_pages: int = 1000
     timeout: float = 20.0
 
+    def __post_init__(self) -> None:
+        for index, url in enumerate(self.proxies):
+            problem = proxy_problem(url)
+            if problem:
+                raise ScrapeConfigError(f"E_PROXY_URL: proxies[{index}] is not a usable proxy URL: {problem}")
+
     @classmethod
     def from_dict(cls, data: Mapping) -> "ScrapeConfig":
         known = {f.name for f in fields(cls)}
@@ -114,11 +147,11 @@ class ScrapeConfig:
 
 
 class _Stop(Exception):
-    """The run cannot go on: it ends as a gap with this code. Never holds a credential."""
+    """The run cannot go on: it ends as a gap with this code, or as a failed run when `fatal`. Never holds a credential."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, fatal: bool = False):
         super().__init__(f"{code}: {message}")
-        self.code, self.message = code, message
+        self.code, self.message, self.fatal = code, message, fatal
 
 
 class _Transient(Exception):
@@ -156,7 +189,7 @@ class ScrapeAdapter:
     ):
         self.cfg = config
         _check_url(config.start_url, "start_url")
-        self.source_ref = config.start_url
+        self.source_ref = identity_url(config.start_url)  # stored with every run: a secret query value is not part of it
         env = os.environ if environ is None else environ
         self._username = self._password = ""
         if config.login_url:
@@ -174,10 +207,18 @@ class ScrapeAdapter:
         for url in self._proxies:
             if "@" in urlsplit(url).netloc:
                 raise ScrapeConfigError("a proxy with credentials goes in proxy_envs, not in proxies")
+        self._proxy_problem = ""
+        self._secrets = [self._password, *query_values(config.start_url), *query_values(config.login_url)]
         for name in config.proxy_envs:
             if not env.get(name):
                 raise ScrapeConfigError(f"environment variable {name} is empty or not set")
             self._proxies.append(env[name])
+            self._secrets.extend(userinfo_secrets(env[name]))
+            problem = proxy_problem(env[name])
+            if problem and not self._proxy_problem:
+                # a value read from the environment is checked when the run starts, so the failure is a run record in the
+                # same place as every other feed failure; the message names the variable and never a part of its value
+                self._proxy_problem = f"the proxy in {name} is not a usable proxy URL: {problem}"
         self._sleep, self._clock = sleep, clock
         self._jitter = jitter or (lambda d: random.uniform(d / 2, d))
         self._last_request: float | None = None
@@ -202,6 +243,10 @@ class ScrapeAdapter:
     def fingerprint(self) -> str:
         return ""  # a live site has no content identity: every run reads it again
 
+    def secret_values(self) -> list[str]:
+        """What the runner takes out of every message it stores: the password, proxy credentials, query values of the URLs."""
+        return [secret for secret in self._secrets if secret]
+
     def notes(self) -> dict:
         return dict(self._stats)
 
@@ -212,10 +257,14 @@ class ScrapeAdapter:
         """Rows with position > start_after. A site has no random access, so a resume reads the pages again and skips."""
         self._position = 0
         try:
+            if self._proxy_problem:
+                raise _Stop("E_PROXY_URL", self._proxy_problem, fatal=True)
             self._load_jar()
             yield from self._walk(start_after)
         except _Stop as stop:
             self._stats["stopped"] = stop.code
+            if stop.fatal:
+                raise FatalError(str(stop)) from None
             yield SourceGap(self._position + 1, self._position + 1, str(stop))
         finally:
             self._save_jar()

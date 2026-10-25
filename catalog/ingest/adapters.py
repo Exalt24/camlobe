@@ -44,6 +44,10 @@ class FeedAdapter(Protocol):
     def notes(self) -> dict:
         """What the adapter learned while reading (encoding, delimiter, retries). Read after iterating."""
 
+    # Optional: `secret_values() -> list[str]` names every secret the adapter was configured with (a password, a token,
+    # proxy credentials, query values of its URLs). The runner removes them from every message it stores or logs
+    # (catalog/ingest/redact.py). `source_ref` is stored as it is, so it must never hold one.
+
 
 def decode_line(raw: bytes) -> tuple[str, bool]:
     """One physical line to text. UTF-8 first, windows-1252 when that fails; (text, used_fallback).

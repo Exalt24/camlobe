@@ -9,6 +9,7 @@ from zeep.helpers import serialize_object
 from zeep.transports import Transport
 
 from .paged import FatalError, PagedAdapter, PermanentError, TransientError
+from .redact import identity_url, query_values
 
 TRANSIENT_FAULTS = ("server.busy", "server.unavailable", "server.timeout")
 
@@ -17,10 +18,14 @@ class SoapAdapter(PagedAdapter):
     def __init__(self, wsdl_url: str, operation: str = "GetCatalogPage", timeout: float = 15.0, **kwargs):
         if "@" in wsdl_url.split("//", 1)[-1].split("/", 1)[0]:
             raise ValueError("pass credentials separately, not inside the WSDL URL")
-        super().__init__(source_ref=wsdl_url, **kwargs)
+        super().__init__(source_ref=identity_url(wsdl_url), **kwargs)  # a token in the query is not part of the stored identity
+        self._secrets = query_values(wsdl_url)
         self.operation = operation
         session = Session()
         self.client = Client(wsdl_url, transport=Transport(session=session, timeout=timeout, operation_timeout=timeout))
+
+    def secret_values(self) -> list[str]:
+        return list(self._secrets)
 
     def fetch_page(self, offset: int, limit: int):
         call = getattr(self.client.service, self.operation)

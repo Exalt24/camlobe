@@ -18,6 +18,13 @@ The tests need the compose Postgres on port 5434 (and Meilisearch on 7701 for th
     python tools/mutation_check.py --baseline                run the aimed tests once unmutated, all must pass
     python tools/mutation_check.py --only edi,paged          only the guards in those target groups
     python tools/mutation_check.py --match cost,header       only guards whose name holds a word
+
+Two kinds of guard. `M(...)` replaces one piece of text by another (a hand-matched pair: it goes stale when the line is
+reworded, and --check-targets then says so). `D(...)` DERIVES its edit: it names a function, a kind of change and a few
+words of the line to aim at, and tools/mutate_ast.py works the change out of the code's syntax tree (a negated condition,
+a swapped comparison, a deleted call). Reword the line and the aim still finds it; remove it and --check-targets says so.
+mutate_ast.py is found through $MUTATE_AST, or an `Operations/tools/mutate_ast.py` above this folder, and a derived guard
+without it is a usage error, never a silent pass.
     python tools/mutation_check.py                           every guard
 
 An argument it does not know is refused with exit 2 and nothing is edited. Exit 0 when every mutant was
@@ -26,11 +33,14 @@ killed, 1 when one survived, 2 on a usage error or a guard whose text cannot be 
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import os
 import signal
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +79,7 @@ TARGETS = {
     "orders": ROOT / "catalog" / "edi" / "orders.py",
     "snapshot": ROOT / "catalog" / "snapshot.py",
     "scrape": ROOT / "catalog" / "ingest" / "scrape.py",
+    "redact": ROOT / "catalog" / "ingest" / "redact.py",
     "pagination": ROOT / "catalog" / "api" / "pagination.py",
 }
 
@@ -82,10 +93,61 @@ class Mutant:
     tests: tuple[str, ...]
     count: int = 1  # how many times `old` must occur; all are replaced
     timeout: int = TIMEOUT_SECONDS  # a guard whose removal loops forever gets a short one
+    function: str = ""  # a DERIVED guard: the function to mutate inside, the kind of change, and words of the line to aim at
+    kind: str = ""
+    anchor: str = ""
 
 
 def M(name, target, old, new, *tests, count=1, timeout=TIMEOUT_SECONDS):
     return Mutant(name, target, old, new, tests, count, timeout)
+
+
+def D(name, target, function, kind, anchor, *tests, timeout=TIMEOUT_SECONDS):
+    """A guard whose edit is derived from the syntax tree. `kind` is the start of what mutate_ast calls the change
+    ("negate the condition", "delete the call statement", "return value", "remove `not`", "Eq", "Lt" ...); `anchor` is text
+    of the line it must sit on. Exactly one site of that kind on such a line inside `function` must exist."""
+    return Mutant(name, target, "", "", tests, 1, timeout, function, kind, anchor)
+
+
+_mutate_ast = None
+
+
+def mutate_ast():
+    global _mutate_ast
+    if _mutate_ast is not None:
+        return _mutate_ast
+    candidates = [os.environ.get("MUTATE_AST", "")]
+    candidates += [str(parent / "Operations" / "tools" / "mutate_ast.py") for parent in ROOT.parents]
+    candidates += ["C:/Projects/Professional/Operations/tools/mutate_ast.py"]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            spec = importlib.util.spec_from_file_location("mutate_ast", candidate)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _mutate_ast = module
+            return module
+    print("a derived guard needs mutate_ast.py: set MUTATE_AST to its path", file=sys.stderr)
+    sys.exit(2)
+
+
+def derive(m: Mutant, text: str) -> tuple[str | None, str]:
+    """(the mutated source, or None, and why not). The site is found by function, kind and the words on its line."""
+    ma = mutate_ast()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tree = ast.parse(text)
+    lines = text.split(chr(10))
+    names = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if m.function not in names:
+        return None, f"no function {m.function}"
+    found = [
+        (index, line, desc)
+        for index, line, desc in ma.sites(tree, text, only_functions=[m.function])
+        if desc.startswith(m.kind) and m.anchor in lines[line - 1]
+    ]
+    if len(found) != 1:
+        return None, f"{len(found)} sites of kind {m.kind!r} on a line holding {m.anchor!r} in {m.function}"
+    return ast.unparse(ma.apply(tree, found[0][0])), ""
 
 
 NORM = "tests/test_normalize.py"
@@ -107,6 +169,8 @@ TRUTH = "tests/test_pipeline_truth.py"
 FORMS = "tests/test_search_forms.py"
 DELIST = "tests/test_delisting.py"
 SCRAPE = "tests/test_scrape.py"
+SECRETS = "tests/test_secrets_not_stored.py"
+PAGES = "tests/test_scrape_pages.py"
 
 MUTANTS: list[Mutant] = [
     # ---- part number, brand and GTIN normalisation ------------------------------------------------
@@ -362,6 +426,13 @@ MUTANTS: list[Mutant] = [
     M("scrape: the user agent is the library's", "scrape", '        self.session.headers["User-Agent"] = config.user_agent', "        pass", SCRAPE),
     M("scrape: a proxy with a password is allowed in the config", "scrape", '            if "@" in urlsplit(url).netloc:', "            if False:", SCRAPE),
     M("scrape: a missing credential variable is accepted", "scrape", "                if not env.get(name):\n                    raise ScrapeConfigError(", "                if False:\n                    raise ScrapeConfigError(", SCRAPE),
+    # ---- a secret is stored nowhere (derived guards: the edit comes from mutate_ast, not from a text pair) ---------------------------------
+    D("redact: a secret found in a message is left in it", "redact", "text", "negate the condition", "if secret in value", SECRETS),
+    D("redact: a log record keeps the secret it carries", "redact", "factory", "negate the condition", "clean != message", SECRETS),
+    D("redact: the identity of a source shows a secret query value", "redact", "identity_url", "negate the condition", "secret_name(unquote_plus(name))", SECRETS),
+    D("scrape: the credentials of a proxy are not among the secrets", "scrape", "__init__", "delete the call statement", "userinfo_secrets", SECRETS),
+    D("scrape: a proxy port above 65535 is accepted", "scrape", "proxy_problem", "LtE -> Gt (operator 2", "65535", SECRETS),
+    D("scrape: a proxy that is not a URL is tried instead of refused", "scrape", "records", "negate the condition", "if self._proxy_problem", SECRETS),
 ]
 
 
@@ -412,7 +483,13 @@ def select(args) -> list[Mutant]:
 def check_targets(mutants: list[Mutant]) -> bool:
     ok = True
     for m in mutants:
-        text = TARGETS[m.target].read_text(encoding="utf-8")
+        text = TARGETS[m.target].read_text(encoding="utf-8").replace("\r\n", "\n")
+        if m.function:
+            mutated, why = derive(m, text)
+            if mutated is None:
+                ok = False
+                print(f"TARGET NOT FOUND ({why}): {m.name}  [{m.target}]", file=sys.stderr)
+            continue
         found = text.count(m.old)
         if found != m.count:
             ok = False
@@ -462,7 +539,12 @@ def main() -> int:
             # a file with CRLF endings is matched as LF text, as check_targets reads it; otherwise a multi line
             # guard would never be edited and its mutant would be reported as a survivor
             as_lf = original.decode("utf-8").replace("\r\n", "\n")
-            mutated = as_lf.replace(m.old, m.new)
+            if m.function:
+                mutated, why = derive(m, as_lf)
+                if mutated is None:
+                    raise SystemExit(f"the derived mutation for {m.name!r} found no site: {why}")
+            else:
+                mutated = as_lf.replace(m.old, m.new)
             if mutated == as_lf:
                 raise SystemExit(f"the mutation for {m.name!r} changed nothing; refusing to report it as a result")
             path.write_text(mutated, encoding="utf-8", newline="")

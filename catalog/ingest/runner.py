@@ -29,6 +29,7 @@ from .mapping import (
     row_identity,
     unmapped_columns,
 )
+from .redact import Redactor
 
 # rejections that say nothing about WHICH part the row was: a pass holding one cannot prove what is missing
 UNREADABLE = frozenset({"column_count", "undecodable_bytes", "nul_character"})
@@ -45,17 +46,23 @@ class _Batch:
 
 
 def ingest(supplier: Supplier, adapter: FeedAdapter, batch_size: int = 1000, allow_mass_delist: bool = False) -> PipelineRun:
+    """Everything this stores or logs about the run passes through ONE Redactor built from the secrets the adapter names
+    (`secret_values()`): an exception's text, a gap's message, the adapter's notes and every log record. The source_ref is
+    the adapter's own and must hold no secret (identity_url builds one for a URL)."""
     source_ref = adapter.source_ref
-    with advisory_lock(f"ingest:{supplier.code}:{source_ref}"):
+    redact = Redactor.for_adapter(adapter)
+    with advisory_lock(f"ingest:{supplier.code}:{source_ref}"), redact.log_guard():
         run = start_run(PipelineRun.Kind.INGEST, supplier, source_ref)
         try:
-            return _ingest_locked(supplier, adapter, run, batch_size, allow_mass_delist)
+            return _ingest_locked(supplier, adapter, run, batch_size, allow_mass_delist, redact)
         except Exception as exc:  # the batch in flight was rolled back; what was committed before stays
-            add_error(run, "ingest", f"{type(exc).__name__}: {exc}")
+            add_error(run, "ingest", redact.text(f"{type(exc).__name__}: {exc}"))
             return finish_run(run, PipelineRun.Status.FAILED)
 
 
-def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, batch_size: int, allow_mass_delist: bool) -> PipelineRun:
+def _ingest_locked(
+    supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, batch_size: int, allow_mass_delist: bool, redact: Redactor
+) -> PipelineRun:
     checkpoint, _ = FeedCheckpoint.objects.get_or_create(supplier=supplier, source_ref=adapter.source_ref)
     fingerprint = adapter.fingerprint()
     run.notes["fingerprint"] = fingerprint
@@ -94,7 +101,7 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
             contiguous = False
             gap_seen = True
             batch.had_gap = True
-            add_error(run, f"positions {item.first_position}-{item.last_position}", item.message)
+            add_error(run, f"positions {item.first_position}-{item.last_position}", redact.text(item.message))
             continue
         batch.records.append(item)
         if item.fields:
@@ -103,7 +110,7 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
             flush()
     flush()
 
-    run.notes.update(adapter.notes())
+    run.notes.update(redact.data(adapter.notes()))
     checkpoint.refresh_from_db()
     if gap_seen:
         return finish_run(run, PipelineRun.Status.PARTIAL)

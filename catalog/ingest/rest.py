@@ -24,8 +24,12 @@ class RestAdapter(PagedAdapter):
         self.timeout = timeout
         self.session = session or requests.Session()
         self.headers = {"Accept": "application/json"}
+        self._token = token or ""
         if token:
             self.headers["Authorization"] = f"Bearer {token}"
+
+    def secret_values(self) -> list[str]:
+        return [self._token] if self._token else []
 
     def fetch_page(self, offset: int, limit: int):
         try:
