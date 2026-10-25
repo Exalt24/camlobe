@@ -1,0 +1,22 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: camlobe
+      POSTGRES_PASSWORD: camlobe
+      POSTGRES_DB: camlobe
+    ports:
+      - "5434:5432"   # deliberately not 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U camlobe -d camlobe"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  search:
+    image: getmeili/meilisearch:v1.12
+    environment:
+      MEILI_MASTER_KEY: camlobe-local-master-key
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7701:7700"   # deliberately not 7700
