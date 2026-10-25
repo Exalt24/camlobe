@@ -17,7 +17,7 @@ from catalog.ingest.runner import ingest
 from catalog.models import FeedCheckpoint, PipelineRun, RawPart, RejectedRow
 from catalog.runs import AlreadyRunning
 
-from .helpers import get_supplier, row, write_csv
+from .helpers import CSV_HEADER, get_supplier, row, write_csv
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -377,3 +377,61 @@ def test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_f
     assert resumed.notes["resumed_from"] == cp.position
     assert RawPart.objects.filter(supplier=s).count() == 6000
     assert PipelineRun.objects.filter(status="running").count() == 0
+
+
+# ---- ordinary feed shapes that used to fail the whole run -------------------------------------------
+
+
+def test_a_csv_with_both_upc_and_ean_columns_loads_and_takes_the_first_valid_gtin(tmp_path):
+    path = tmp_path / "both.csv"
+    path.write_text(
+        "PartNo,Brand,Description,Cost,UPC,EAN\n"
+        "AB100,Marlow,both valid,1.00,012345678905,0012345678905\n"  # the same code in two widths: the UPC column is first
+        "AB101,Marlow,first is junk,1.00,12345,5012345678900\n"
+        "AB102,Marlow,only junk,1.00,12345,999\n"
+        "AB103,Marlow,neither,1.00,,\n",
+        encoding="utf-8",
+    )
+    run = ingest(get_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 4
+    assert {r.part_number_raw: r.gtin_raw for r in RawPart.objects.all()} == {
+        "AB100": "012345678905", "AB101": "5012345678900", "AB102": "12345", "AB103": ""
+    }  # a junk GTIN with nothing better is kept, so the normalise step still flags it as invalid
+    assert run.notes["doubled_columns"] == {"gtin": ["UPC", "EAN"]}
+    # which column carried each row's GTIN: the two valid ones, and the junk value that was kept because nothing was better
+    assert run.notes["column_choices"]["gtin"] == {"UPC": 2, "EAN": 1}
+
+
+def test_two_columns_for_a_required_field_are_still_refused(tmp_path):
+    path = tmp_path / "two_numbers.csv"
+    path.write_text("SKU,MPN,Brand,Cost\nAB100,XY200,Marlow,1.00\n", encoding="utf-8")
+    run = ingest(get_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.FAILED and "more than one column maps to the same field" in run.errors[0]["message"]
+    assert RawPart.objects.count() == 0
+
+
+def test_a_utf16_excel_export_goes_through_the_runner(tmp_path):
+    path = tmp_path / "unicode.txt"
+    text = "PartNo\tMfr\tDescription\tCost\tUPC\r\nAB100\tMarlow\tPompe à eau\t1.00\t\r\n"
+    path.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+    run = ingest(get_supplier(), FileAdapter(path, fmt="csv"))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 1 and run.notes["encoding"] == "utf-16"
+    assert RawPart.objects.get().description_raw == "Pompe à eau"
+
+
+def test_a_namespaced_xml_feed_goes_through_the_runner(tmp_path):
+    path = tmp_path / "ns.xml"
+    path.write_text(
+        '<catalog xmlns="urn:example:catalog"><item><sku>AB100</sku><manufacturer>Marlow</manufacturer><price>1.00</price></item></catalog>',
+        encoding="utf-8",
+    )
+    run = ingest(get_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 1
+
+
+def test_a_nul_in_one_row_rejects_that_row_and_not_the_run(tmp_path):
+    path = tmp_path / "nul.csv"
+    path.write_bytes(",".join(CSV_HEADER).encode() + b"\r\nAB100,Marlow,Oil\x00filter,1.00,\r\nAB101,Marlow,Fine,2.00,\r\n")
+    run = ingest(get_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.SUCCEEDED and (run.rows_written, run.rows_rejected) == (1, 1)
+    assert RejectedRow.objects.get().reason == "nul_character" and "\x00" not in RejectedRow.objects.get().raw

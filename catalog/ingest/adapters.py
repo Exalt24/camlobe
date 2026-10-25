@@ -58,6 +58,34 @@ def decode_line(raw: bytes) -> tuple[str, bool]:
         return raw.decode("cp1252", errors="replace"), True
 
 
+def wide_encoding(data: bytes) -> str | None:
+    """The codec of a UTF-16 or UTF-32 file, or None for the usual byte oriented text.
+
+    Excel's "Unicode Text" export is UTF-16 with a byte order mark. A file without one is recognised by its NULs:
+    in text that is mostly ASCII every second byte (UTF-16) is zero, and which of the two says the byte order.
+    One stray NUL in an ordinary file is nowhere near that, so it is not mistaken for UTF-16.
+    """
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")) and len(data) % 4 == 0:
+        return "utf-32"
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    sample = data[:2048]
+    pairs = len(sample) // 2
+    if pairs < 4:
+        return None
+    even, odd = sample[0 : pairs * 2 : 2].count(0), sample[1 : pairs * 2 : 2].count(0)
+    if odd >= 0.8 * pairs and even <= 0.1 * pairs:
+        return "utf-16-le"
+    if even >= 0.8 * pairs and odd <= 0.1 * pairs:
+        return "utf-16-be"
+    return None
+
+
+def local_name(name: str) -> str:
+    """`{urn:example}sku` is `sku`: the part after the namespace in ElementTree's notation."""
+    return name.rsplit("}", 1)[-1]
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -100,15 +128,21 @@ class FileAdapter:
 
     def _csv(self, start_after: int) -> Iterator[SourceRecord | SourceGap]:
         data = self.path.read_bytes()
-        if data.startswith(b"\xef\xbb\xbf"):
-            data = data[3:]
-            self._notes["bom"] = True
         lines: list[str] = []
         fallback = 0
-        for raw in data.splitlines(keepends=True):
-            text, used_fallback = decode_line(raw)
-            fallback += used_fallback
-            lines.append(text)
+        wide = wide_encoding(data)
+        if wide:
+            # a wide export is decoded whole: its line breaks are two or four bytes, so bytes cannot be split on them
+            self._notes["encoding"] = wide
+            lines = data.decode(wide, errors="replace").lstrip("﻿").splitlines(keepends=True)
+        else:
+            if data.startswith(b"\xef\xbb\xbf"):
+                data = data[3:]
+                self._notes["bom"] = True
+            for raw in data.splitlines(keepends=True):
+                text, used_fallback = decode_line(raw)
+                fallback += used_fallback
+                lines.append(text)
         self._notes["fallback_lines"] = fallback
         if not lines:
             return
@@ -147,10 +181,12 @@ class FileAdapter:
                     continue
                 position += 1
                 if position > start_after:
-                    fields: dict[str, str] = {}
+                    # the record's own attributes, then its children; a namespace is markup, not part of a field name
+                    fields: dict[str, str] = {local_name(a): v for a, v in element.attrib.items()}
                     for child in element:
-                        fields[child.tag] = (child.text or "").strip()
+                        name = local_name(child.tag)
+                        fields[name] = (child.text or "").strip()
                         for attr, value in child.attrib.items():
-                            fields[f"{child.tag}@{attr}"] = value
-                    yield SourceRecord(position, fields, (element.tag or "")[:200])
+                            fields[f"{name}@{local_name(attr)}"] = value
+                    yield SourceRecord(position, fields, local_name(element.tag or "")[:200])
                 element.clear()

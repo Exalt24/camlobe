@@ -107,3 +107,20 @@ def test_keys_depend_on_what_they_should():
     assert key != idempotency_key("s2", "a.csv", 1, h)  # another supplier
     assert key != idempotency_key("s1", "b.csv", 1, h)  # another source
     assert key != idempotency_key("s1", "a.csv", 2, h)  # another row
+
+
+def test_a_doubled_optional_field_is_kept_in_header_order_and_a_doubled_required_one_is_refused():
+    mapping = resolve_headers(["PartNo", "Brand", "Cost", "UPC", "EAN", "Title", "Description"])
+    assert mapping["gtin"] == ("UPC", "EAN") and mapping["description"] == ("Title", "Description")
+    assert resolve_headers(["EAN", "PartNo", "Brand", "Cost", "UPC"])["gtin"] == ("EAN", "UPC")  # left to right, not alphabetical
+    assert unmapped_columns(["PartNo", "Brand", "Cost", "UPC", "EAN", "Bin"], resolve_headers(["PartNo", "Brand", "Cost", "UPC", "EAN"])) == ["Bin"]
+    with pytest.raises(SchemaDriftError, match="more than one column"):
+        resolve_headers(["SKU", "MPN", "Brand", "Cost"])
+
+
+def test_the_first_valid_gtin_wins_and_the_first_filled_description_wins():
+    mapping = resolve_headers(["PartNo", "Brand", "Cost", "UPC", "EAN", "Title", "Description"])
+    got = map_row({"PartNo": "AB123", "Brand": "Marlow", "Cost": "1", "UPC": "123", "EAN": "5012345678900", "Title": "", "Description": "Oil"}, mapping)
+    assert (got.gtin, got.description, got.picked) == ("5012345678900", "Oil", {"gtin": "EAN", "description": "Description"})
+    junk = map_row({"PartNo": "AB123", "Brand": "Marlow", "Cost": "1", "UPC": "123", "EAN": "999"}, mapping)
+    assert junk.gtin == "123"  # nothing valid: the first value is kept so it is flagged invalid, not silently dropped
