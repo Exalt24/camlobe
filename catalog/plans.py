@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field
 
 from django.db import connection
+from django.db.models import F
 
 from .models import Fitment, NormalizedRow, Part, RawPart, ReviewItem, Vehicle
 
@@ -98,6 +99,11 @@ def build_checks(sample: int = 2000) -> list[PlanCheck]:
             "rawpart_latest_idx",
         ),
         PlanCheck("api: search by part number prefix", Part.objects.filter(number_norm__startswith=prefix).order_by("number_norm")[:25], "part_number_idx"),
+        PlanCheck(
+            "search: parts not yet indexed",
+            Part.objects.filter(indexed_version__lt=F("search_version")).order_by("id")[:1000],
+            "part_search_dirty_idx",
+        ),
         PlanCheck("review queue", ReviewItem.objects.filter(status="pending").order_by("id")[:50], "review_status_idx"),
     ]
     if vehicle is not None:

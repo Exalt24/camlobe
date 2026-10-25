@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 
 from .models import NormalizedRow, Part, PartSource, ReviewItem
@@ -181,7 +182,7 @@ def match_batch(rows: list[NormalizedRow]) -> dict[str, int]:
         Part.objects.bulk_update(list(gtin_updates.values()), ["gtin"])
     new_ids = {p.pk for p in new_parts}
     if touched - new_ids:
-        Part.objects.filter(pk__in=touched - new_ids).update(updated_at=now)
+        Part.objects.filter(pk__in=touched - new_ids).update(updated_at=now, search_version=F("search_version") + 1)
     by_state: dict[str, list[int]] = defaultdict(list)
     for row in rows:
         row.match_state = state[row.pk]
@@ -231,7 +232,7 @@ def resolve_review(
                 linked_by="review",
                 last_seen=now,
             )
-            Part.objects.filter(pk=part.pk).update(updated_at=now)
+            Part.objects.filter(pk=part.pk).update(updated_at=now, search_version=F("search_version") + 1)
             item.resolved_part = part
             row.match_state = NormalizedRow.MatchState.MATCHED
         item.resolved_at = now

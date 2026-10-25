@@ -253,8 +253,44 @@ def write_feeds(out: Path, size: int = 20000, seed: int = 7) -> dict:
         w.writeheader()
         for row in truth:
             w.writerow({"expect": "", **row})
+    counts["fitment_aces.csv"] = write_fitment(out / "fitment_aces.csv", uni, rng)
     (out / "manifest.json").write_text(json.dumps({"seed": seed, "universe": size, "rows": counts}, indent=2), encoding="utf-8")
     return counts
+
+
+VEHICLES = [
+    (make, model, engines)
+    for make, models in {
+        "Altair": [("T200", ["2.0L I4", "3.5L V6"]), ("T300", ["1.6L I4 Turbo", "2.0L I4"])],
+        "Brandt": [("Kombi", ["1.8L I4"]), ("Rover S", ["3.5L V6", "2.5L I4"])],
+        "Corvane": [("Dart", ["2.4L I4"]), ("Ridge", ["3.6L V6", "2.4L I4"])],
+        "Deltoro": [("Mesa", ["2.0L I4 Turbo"]), ("Pico", ["1.3L I3"])],
+    }.items()
+    for model, engines in models
+]
+POSITIONED = {"Brake pad set": ["front", "rear"], "Brake rotor": ["front", "rear"], "Strut assembly": ["front", "rear"], "Control arm": ["front"]}
+
+
+def write_fitment(path: Path, uni: Universe, rng: random.Random) -> int:
+    """An ACES style application file for invented vehicles. Part numbers are written messily, as a catalog would."""
+    rows = [["brand", "part_number", "year", "make", "model", "submodel", "engine", "position", "note"]]
+    for part in uni.parts:
+        if rng.random() > 0.35:
+            continue
+        for _ in range(rng.randint(1, 3)):
+            make, model, engines = rng.choice(VEHICLES)
+            year = rng.randint(2008, 2024)
+            for position in POSITIONED.get(part["title"], [""]):
+                rows.append([
+                    _brand_name(part["brand"], rng), _redline_number(part["brand"], part["number"], rng),
+                    str(year), make, model, rng.choice(["", "Base", "Sport"]), rng.choice(engines), position, "",
+                ])
+    # rows a loader must refuse: a part nobody lists, a year that is not one
+    rows.append(["Marlow", "ZZ-99999", "2015", "Altair", "T200", "", "2.0L I4", "", ""])
+    rows.append(["Marlow", rows[1][1], "twenty-fifteen", "Altair", "T200", "", "2.0L I4", "", ""])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle, lineterminator="\r\n").writerows(rows)
+    return len(rows) - 1
 
 
 def _harbor_item(sku: str, brand: str | None, title: str, cost: str, gtin: str) -> str:

@@ -19,9 +19,9 @@ def seed_bulk() -> None:
             " '[]', '{}' FROM catalog_supplier WHERE code = 'bulk'"
         )
         c.execute(
-            "INSERT INTO catalog_part (brand, number_norm, description, gtin, created_at, updated_at)"
+            "INSERT INTO catalog_part (brand, number_norm, description, gtin, created_at, updated_at, search_version, indexed_version)"
             " SELECT 'B' || mod(i, 6), 'N' || lpad(i::text, 7, '0'), 'd', CASE WHEN mod(i, 3) = 0 THEN '' ELSE lpad(i::text, 14, '0') END,"
-            " now(), now() FROM generate_series(1, %s) i",
+            " now(), now(), 1, CASE WHEN mod(i, 500) = 0 THEN 0 ELSE 1 END FROM generate_series(1, %s) i",
             [N],
         )
         c.execute(
@@ -62,7 +62,7 @@ def bulk(db):
 
 def test_every_hot_query_uses_its_index_at_sixty_thousand_parts(bulk):
     results = check_plans(sample=200)
-    assert len(results) == 7
+    assert len(results) == 8
     for r in results:
         assert r.ok, f"{r.name}: {r.problems}"
 
@@ -73,6 +73,7 @@ DROPS = {
     "rawpart_latest_idx": ["ingest: latest raw row per part number"],
     "norm_pending_idx": ["match: pending queue"],
     "review_status_idx": ["review queue"],
+    "part_search_dirty_idx": ["search: parts not yet indexed"],
     "one_vehicle_row": ["api: fitment for a vehicle"],  # the unique constraint is the index (year, make, model, ...)
 }
 
@@ -104,7 +105,7 @@ def test_a_slow_query_fails_its_budget(bulk):
 
 def test_the_command_reports_and_fails_on_a_problem(bulk, capsys):
     call_command("check_query_plans", "--sample", "200")
-    assert "7 of 7 query plans use their indexes" in capsys.readouterr().out
+    assert "8 of 8 query plans use their indexes" in capsys.readouterr().out
     with connection.cursor() as c:
         c.execute("DROP INDEX part_gtin_idx")
     with pytest.raises(Exception, match="query plans failed"):

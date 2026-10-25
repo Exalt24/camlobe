@@ -6,6 +6,7 @@ Part is the canonical product; PartSource links one supplier's listing to it. Re
 every match the rules refuse to decide alone.
 """
 from django.db import models
+from django.db.models import F, Q
 
 
 class Supplier(models.Model):
@@ -25,6 +26,7 @@ class PipelineRun(models.Model):
         NORMALIZE = "normalize"
         MATCH = "match"
         INDEX = "index"
+        FITMENT = "fitment"
 
     class Status(models.TextChoices):
         RUNNING = "running"
@@ -67,7 +69,7 @@ class FeedCheckpoint(models.Model):
 
 class RejectedRow(models.Model):
     run = models.ForeignKey(PipelineRun, on_delete=models.CASCADE, related_name="rejected")
-    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT)
+    supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.PROTECT)
     position = models.BigIntegerField()
     reason = models.CharField(max_length=60)
     raw = models.TextField(blank=True)
@@ -130,6 +132,9 @@ class Part(models.Model):
     gtin = models.CharField(max_length=14, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField()
+    # bumped on every change that shows in search; the sync sends parts where indexed_version < search_version
+    search_version = models.IntegerField(default=1)
+    indexed_version = models.IntegerField(default=0)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["brand", "number_norm"], name="one_part_per_brand_number")]
@@ -137,7 +142,7 @@ class Part(models.Model):
             # varchar_pattern_ops serves both "= value" and "LIKE 'prefix%'", so one index covers match and search
             models.Index(fields=["number_norm"], name="part_number_idx", opclasses=["varchar_pattern_ops"]),
             models.Index(fields=["gtin"], name="part_gtin_idx"),
-            models.Index(fields=["updated_at", "id"], name="part_updated_idx"),
+            models.Index(fields=["id"], name="part_search_dirty_idx", condition=Q(indexed_version__lt=F("search_version"))),
         ]
 
 
@@ -214,12 +219,10 @@ class Fitment(models.Model):
 
 
 class SearchIndexState(models.Model):
-    """Progress of the Meilisearch rebuild and the incremental sync."""
+    """Progress of a Meilisearch rebuild. The incremental sync needs no cursor: it reads Part.search_version."""
 
     index_uid = models.CharField(max_length=60, unique=True)
     status = models.CharField(max_length=12, default="idle")  # idle, building, ready
-    rebuild_after_id = models.BigIntegerField(default=0)  # rebuild cursor: last Part id sent
-    sync_updated_at = models.DateTimeField(null=True, blank=True)  # incremental cursor, with the id below
-    sync_part_id = models.BigIntegerField(default=0)
+    rebuild_after_id = models.BigIntegerField(default=0)  # last Part id the rebuild has sent
     docs_sent = models.BigIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)

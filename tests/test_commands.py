@@ -114,3 +114,26 @@ def test_the_generator_is_deterministic_for_a_seed(tmp_path):
     call_command("gen_demo_feeds", "--out", str(tmp_path / "b"), "--size", "200", "--seed", "5")
     for name in ("redline_catalog.csv", "harbor_catalog.xml", "truth.csv"):
         assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+
+
+def test_fitment_and_index_commands(tmp_path, capsys, meili):
+    from .helpers import get_supplier, run_all
+    from .test_fitment import HEADER
+
+    run_all(get_supplier(), write_csv(tmp_path / "f.csv", [row("MF-H1001A"), row("H1002A", "Marlow", "Oil filter two")]))
+    fit = tmp_path / "fit.csv"
+    write_csv(fit, [["Marlow", "H1001A", "2019", "Altair", "T200", "", "2.0L I4", "", ""]], header=HEADER)
+    call_command("load_fitment", str(fit))
+    call_command("load_fitment", str(fit))
+    out = capsys.readouterr().out
+    assert "new=1" in out and "already_there=1" in out
+    with pytest.raises(CommandError, match="not been built"):
+        call_command("sync_search_index")
+    call_command("rebuild_search_index", "--batch-size", "1")
+    call_command("sync_search_index")
+    out = capsys.readouterr().out
+    assert "index rebuild run" in out and "documents_sent=2" in out and "index sync run" in out and "documents_sent=0" in out
+    bad = tmp_path / "bad.csv"
+    bad.write_text("brand,part_number\r\nMarlow,H1001A\r\n", encoding="utf-8")
+    with pytest.raises(CommandError, match="failed"):
+        call_command("load_fitment", str(bad))
