@@ -261,4 +261,8 @@ def resolve_review(
         item.resolved_at = now
         item.save()
         row.save(update_fields=["match_state"])
+        if not ignore:
+            from .snapshot import apply_snapshot  # a listing a person links is still checked against the supplier's full feed
+
+            apply_snapshot(row.supplier)
     return item

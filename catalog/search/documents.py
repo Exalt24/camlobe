@@ -130,11 +130,16 @@ def leg_filter(leg: dict) -> Q:
 
 
 def documents_for(parts_qs) -> list[dict]:
-    """Search documents for the parts in a queryset, with their supplier codes and lowest cost."""
+    """Search documents for the parts in a queryset, with their supplier codes and lowest cost.
+
+    Only listings that are not delisted count: a supplier that dropped a part from its full feed no longer
+    offers it, so it must not show as a supplier or set the lowest cost.
+    """
+    live = Q(sources__isnull=False, sources__delisted_at__isnull=True)
     rows = (
         parts_qs.annotate(
-            supplier_codes=ArrayAgg("sources__supplier__code", distinct=True, filter=Q(sources__isnull=False)),
-            lowest_cost=Min("sources__cost_cents"),
+            supplier_codes=ArrayAgg("sources__supplier__code", distinct=True, filter=live),
+            lowest_cost=Min("sources__cost_cents", filter=Q(sources__delisted_at__isnull=True)),
         )
         .order_by("id")
         .values("id", "brand", "number_norm", "description", "gtin", "supplier_codes", "lowest_cost", "search_version")

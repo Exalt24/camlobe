@@ -57,7 +57,16 @@ class PartSearchView(APIView):
 class PartDetailView(generics.RetrieveAPIView):
     serializer_class = PartDetailSerializer
     queryset = Part.objects.prefetch_related(
-        Prefetch("sources", queryset=PartSource.objects.select_related("supplier").order_by("supplier__code", "id")),
+        Prefetch(
+            "sources",
+            queryset=PartSource.objects.filter(delisted_at__isnull=True).select_related("supplier").order_by("supplier__code", "id"),
+            to_attr="live_sources",
+        ),
+        Prefetch(
+            "sources",
+            queryset=PartSource.objects.filter(delisted_at__isnull=False).select_related("supplier").order_by("supplier__code", "id"),
+            to_attr="gone_sources",
+        ),
         Prefetch("fitments", queryset=Fitment.objects.select_related("vehicle").order_by("vehicle__year", "vehicle__make", "vehicle__model", "id")),
     )
 

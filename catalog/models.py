@@ -13,6 +13,8 @@ class Supplier(models.Model):
     code = models.SlugField(max_length=40, unique=True)
     name = models.CharField(max_length=120)
     created_at = models.DateTimeField(auto_now_add=True)
+    # True when the supplier's feed lists everything it offers: a listing missing from a complete run is delisted
+    full_snapshot = models.BooleanField(default=False, db_default=False)
 
     def __str__(self) -> str:
         return self.code
@@ -60,11 +62,27 @@ class FeedCheckpoint(models.Model):
     fingerprint = models.CharField(max_length=64, blank=True)
     position = models.BigIntegerField(default=0)
     completed = models.BooleanField(default=False)
+    completed_at = models.DateTimeField(null=True, blank=True)  # when the pass over the whole source finished
     updated_at = models.DateTimeField(auto_now=True)
     last_run = models.ForeignKey(PipelineRun, null=True, on_delete=models.SET_NULL, related_name="+")
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["supplier", "source_ref"], name="one_checkpoint_per_source")]
+
+
+class SnapshotSeen(models.Model):
+    """A supplier part the pass over a snapshot feed read (kept for suppliers flagged full_snapshot only).
+
+    Rows that did not change store no RawPart, so what a full feed still lists can only be known from this table.
+    An empty part number is a marker: a row the pass could not read, so the pass cannot prove what is missing.
+    """
+
+    checkpoint = models.ForeignKey(FeedCheckpoint, on_delete=models.CASCADE, related_name="seen")
+    part_number_raw = models.CharField(max_length=200, blank=True)
+    brand_raw = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["checkpoint", "part_number_raw", "brand_raw"], name="one_seen_per_pass")]
 
 
 class RejectedRow(models.Model):
@@ -163,6 +181,8 @@ class PartSource(models.Model):
     linked_by = models.CharField(max_length=20)  # rule name, or "review"
     first_seen = models.DateTimeField(auto_now_add=True)
     last_seen = models.DateTimeField()
+    # set when the supplier's latest complete snapshot no longer lists it; cleared when it lists it again
+    delisted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["supplier", "listing_key"], name="one_listing_per_supplier")]

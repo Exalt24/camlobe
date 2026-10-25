@@ -29,14 +29,24 @@ class FitmentSerializer(serializers.ModelSerializer):
         fields = ["year", "make", "model", "submodel", "engine", "position", "note"]
 
 
+class DelistedSourceSerializer(serializers.ModelSerializer):
+    supplier = serializers.CharField(source="supplier.code")
+
+    class Meta:
+        model = PartSource
+        fields = ["supplier", "supplier_part_number", "delisted_at"]
+
+
 class PartDetailSerializer(serializers.ModelSerializer):
     number = serializers.CharField(source="number_norm")
-    sources = SourceSerializer(many=True, read_only=True)
+    # sources and delisted_sources are filled by the view's prefetch: a delisted listing is not an offer
+    sources = SourceSerializer(source="live_sources", many=True, read_only=True)
+    delisted_sources = DelistedSourceSerializer(source="gone_sources", many=True, read_only=True)
     fitment = FitmentSerializer(source="fitments", many=True, read_only=True)
 
     class Meta:
         model = Part
-        fields = ["id", "brand", "number", "description", "gtin", "sources", "fitment"]
+        fields = ["id", "brand", "number", "description", "gtin", "sources", "delisted_sources", "fitment"]
 
 
 class FitmentPartSerializer(serializers.ModelSerializer):

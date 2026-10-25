@@ -35,6 +35,10 @@ class Command(BaseCommand):
         src.add_argument("--soap-wsdl", help="WSDL URL of a SOAP service with a GetCatalogPage operation")
         parser.add_argument("--page-size", type=int, default=100, help="for --rest-url and --soap-wsdl")
         parser.add_argument("--rate-limit", type=float, default=None, help="requests per second for --rest-url and --soap-wsdl")
+        mode = parser.add_argument_group("full snapshot feeds (remembered for the supplier)")
+        mode.add_argument("--snapshot", action="store_true", help="this supplier's feed lists everything it offers: parts missing from a complete run are delisted")
+        mode.add_argument("--incremental", action="store_true", help="this supplier's feed is not a full snapshot: nothing is ever delisted")
+        mode.add_argument("--allow-mass-delist", action="store_true", help="let a run delist more than half of a supplier's listings")
 
     def build_adapter(self, opts):
         chosen = [k for k in ("file", "sftp_host", "rest_url", "soap_wsdl") if opts[k]]
@@ -76,10 +80,17 @@ class Command(BaseCommand):
             raise CommandError(str(exc))
 
     def handle(self, *args, **opts):
+        if opts["snapshot"] and opts["incremental"]:
+            raise CommandError("--snapshot and --incremental are opposites: give one")
         supplier, _ = Supplier.objects.get_or_create(code=opts["supplier"], defaults={"name": opts["name"] or opts["supplier"]})
+        for flag, value in (("snapshot", True), ("incremental", False)):
+            if opts[flag] and supplier.full_snapshot != value:
+                supplier.full_snapshot = value
+                supplier.save(update_fields=["full_snapshot"])
+                self.stdout.write(f"{supplier.code} is now a {'full snapshot' if value else 'incremental'} supplier")
         adapter = self.build_adapter(opts)
         try:
-            run = ingest(supplier, adapter, batch_size=opts["batch_size"])
+            run = ingest(supplier, adapter, batch_size=opts["batch_size"], allow_mass_delist=opts["allow_mass_delist"])
         except AlreadyRunning:
             raise CommandError("another ingest of this source is running")
         finally:
@@ -92,6 +103,9 @@ class Command(BaseCommand):
             + (f" resumed_from={run.notes['resumed_from']}" if "resumed_from" in run.notes else "")
             + (f" ({run.notes['skipped']})" if "skipped" in run.notes else "")
         )
+        done = run.notes.get("snapshot")
+        if done:
+            self.stdout.write(f"snapshot: delisted={done['delisted']} relisted={done['relisted']}" + (f" REFUSED: {done['delist_refused']}" if "delist_refused" in done else ""))
         if run.status != PipelineRun.Status.SUCCEEDED:
             for err in run.errors[:3]:
                 self.stderr.write(f"  {err['where']}: {err['message']}")

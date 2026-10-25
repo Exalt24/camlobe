@@ -14,30 +14,40 @@ from .x12 import Asn, Invoice, Line, PoAck, PurchaseOrder
 
 
 class OrderError(Exception):
-    pass
+    """An order that cannot be built. `code` names the reason (E_DELISTED, E_NOT_LISTED, ...) and is part of the text."""
+
+    def __init__(self, message: str, code: str = "E_ORDER"):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
 
 
 def purchase_order_for(supplier_code: str, items: list[tuple[int, int]], po_number: str, date: dt.date, ship_to: str = "") -> PurchaseOrder:
     """items: (part id, quantity). Raises OrderError for a part the supplier does not list or has no cost for."""
     if not items:
-        raise OrderError("an order needs at least one line")
+        raise OrderError("an order needs at least one line", "E_NO_LINES")
     try:
         supplier = Supplier.objects.get(code=supplier_code)
     except Supplier.DoesNotExist:
-        raise OrderError(f"no supplier {supplier_code!r}")
+        raise OrderError(f"no supplier {supplier_code!r}", "E_NO_SUPPLIER")
     lines = []
     for n, (part_id, qty) in enumerate(items, start=1):
         if qty < 1:
-            raise OrderError(f"part {part_id}: quantity must be at least 1")
+            raise OrderError(f"part {part_id}: quantity must be at least 1", "E_QTY")
         try:
             part = Part.objects.get(pk=part_id)
         except Part.DoesNotExist:
-            raise OrderError(f"no part {part_id}")
-        source = PartSource.objects.filter(part=part, supplier=supplier).order_by("-last_seen").first()
+            raise OrderError(f"no part {part_id}", "E_NO_PART")
+        listings = PartSource.objects.filter(part=part, supplier=supplier)
+        source = listings.filter(delisted_at__isnull=True).order_by("-last_seen").first()
+        if source is None and listings.exists():
+            raise OrderError(
+                f"{supplier_code} dropped {part.brand} {part.number_norm} from its latest full feed: it cannot be ordered", "E_DELISTED"
+            )
         if source is None:
-            raise OrderError(f"{supplier_code} does not list {part.brand} {part.number_norm}")
+            raise OrderError(f"{supplier_code} does not list {part.brand} {part.number_norm}", "E_NOT_LISTED")
         if source.cost_cents is None:
-            raise OrderError(f"{supplier_code} has no cost for {part.brand} {part.number_norm}: it cannot be ordered")
+            raise OrderError(f"{supplier_code} has no cost for {part.brand} {part.number_norm}: it cannot be ordered", "E_NO_COST")
         lines.append(Line(str(n), qty, "EA", source.cost_cents, "VP", source.supplier_part_number))
     return PurchaseOrder(po_number, date, tuple(lines), ship_to=ship_to)
 

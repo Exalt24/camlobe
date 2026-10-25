@@ -25,8 +25,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from .matching_batch import listing_key, match_batch, resolve_review
-from .models import NormalizedRow, PipelineRun
+from .models import NormalizedRow, PipelineRun, Supplier
 from .runs import add_error, advisory_lock, finish_run, start_run
+from .snapshot import apply_snapshot
 
 
 def match_pending(batch_size: int = 2000, limit: int | None = None) -> PipelineRun:
@@ -59,6 +60,11 @@ def match_pending(batch_size: int = 2000, limit: int | None = None) -> PipelineR
                 for key in ("created", "review"):
                     run.notes[key] = run.notes.get(key, 0) + stats[key]
                 after_id = rows[-1].id
+            # listings made from rows older than a supplier's latest full feed are checked against it
+            for supplier in Supplier.objects.filter(full_snapshot=True):
+                done = apply_snapshot(supplier)
+                if done.get("delisted") or done.get("relisted"):
+                    run.notes.setdefault("snapshots", {})[supplier.code] = done
             return finish_run(run, PipelineRun.Status.SUCCEEDED)
         except Exception as exc:
             add_error(run, "match", f"{type(exc).__name__}: {exc}")

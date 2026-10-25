@@ -62,7 +62,7 @@ def bulk(db):
 
 def test_every_hot_query_uses_its_index_at_sixty_thousand_parts(bulk):
     results = check_plans(sample=200)
-    assert len(results) == 8
+    assert len(results) == 9
     for r in results:
         assert r.ok, f"{r.name}: {r.problems}"
 
@@ -114,7 +114,7 @@ def test_a_slow_query_fails_its_budget(bulk):
 
 def test_the_command_reports_and_fails_on_a_problem(bulk, capsys):
     call_command("check_query_plans", "--sample", "200")
-    assert "8 of 8 query plans use their indexes" in capsys.readouterr().out
+    assert "9 of 9 query plans use their indexes" in capsys.readouterr().out
     with connection.cursor() as c:
         c.execute("DROP INDEX part_gtin_idx")
     with pytest.raises(Exception, match="query plans failed"):

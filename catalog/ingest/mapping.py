@@ -4,14 +4,22 @@ A feed is mapped by column NAME, never by position, so a supplier that reorders 
 nothing. A column renamed to a known alias maps as before. A required column that no header maps to
 fails the run before a row is written (SchemaDriftError), because mapping it to "empty" would turn a
 whole feed into unbranded rows without a single error.
+
+Two columns for one REQUIRED field (SKU and MPN both read as the part number) are still refused: which one is
+the supplier's number is a decision, not a default. Two columns for an OPTIONAL field are ordinary (UPC and EAN
+side by side): a row takes the first valid GTIN in header order, and the first non empty description, and the run
+notes say which columns were used and how often.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from typing import Iterable
+
+from ..normalize import normalize_gtin
 
 REQUIRED = ("part_number", "brand", "cost")
 OPTIONAL = ("description", "gtin")
@@ -33,10 +41,15 @@ def header_key(header: str) -> str:
     return re.sub(r"[^a-z0-9]", "", header.lower())
 
 
-def resolve_headers(headers: set[str]) -> dict[str, str]:
-    """canonical field -> the header that carries it. Raises SchemaDriftError on a missing or doubled one."""
+def resolve_headers(headers: Iterable[str]) -> dict[str, str | tuple[str, ...]]:
+    """canonical field -> the header that carries it (a tuple, in header order, for a doubled optional field).
+
+    Raises SchemaDriftError on a missing required field or a doubled required one. A set is read in sorted
+    order; any other iterable keeps its order, which is what "first valid GTIN" means.
+    """
+    ordered = sorted(headers) if isinstance(headers, (set, frozenset)) else list(dict.fromkeys(headers))
     found: dict[str, list[str]] = {}
-    for header in sorted(headers):
+    for header in ordered:
         key = header_key(header)
         for field, aliases in FIELD_ALIASES.items():
             if key in aliases:
@@ -46,14 +59,22 @@ def resolve_headers(headers: set[str]) -> dict[str, str]:
         raise SchemaDriftError(
             f"no column maps to {', '.join(missing)}; the feed has {', '.join(sorted(headers)) or 'no columns'}"
         )
-    doubled = {f: h for f, h in found.items() if len(h) > 1}
+    doubled = {f: h for f, h in found.items() if len(h) > 1 and f in REQUIRED}
     if doubled:
         raise SchemaDriftError(f"more than one column maps to the same field: {doubled}")
-    return {field: hs[0] for field, hs in found.items()}
+    return {f: (hs[0] if len(hs) == 1 else tuple(hs)) for f, hs in found.items()}
 
 
-def unmapped_columns(headers: set[str], mapping: dict[str, str]) -> list[str]:
-    return sorted(headers - set(mapping.values()))
+def mapped_headers(mapping: dict[str, str | tuple[str, ...]]) -> set[str]:
+    return {h for value in mapping.values() for h in ((value,) if isinstance(value, str) else value)}
+
+
+def unmapped_columns(headers: Iterable[str], mapping: dict[str, str | tuple[str, ...]]) -> list[str]:
+    return sorted(set(headers) - mapped_headers(mapping))
+
+
+def doubled_columns(mapping: dict[str, str | tuple[str, ...]]) -> dict[str, list[str]]:
+    return {f: list(v) for f, v in mapping.items() if not isinstance(v, str)}
 
 
 class RowRejected(Exception):
@@ -96,12 +117,39 @@ class MappedRow:
     description: str
     gtin: str
     cost_cents: int | None
+    picked: dict = field(default_factory=dict, compare=False)  # doubled optional field -> the header this row used
 
 
-def map_row(fields: dict[str, str], mapping: dict[str, str]) -> MappedRow:
-    def get(field: str) -> str:
-        header = mapping.get(field)
-        return (fields.get(header) or "").strip() if header else ""
+def _value(fields: dict[str, str], header: str) -> str:
+    return (fields.get(header) or "").strip()
+
+
+def _pick(fields: dict[str, str], headers: tuple[str, ...], field_name: str) -> tuple[str, str]:
+    """(value, header) from a doubled optional field: the first valid GTIN, or the first non empty description."""
+    values = [(h, _value(fields, h)) for h in headers]
+    if field_name == "gtin":
+        for header, value in values:
+            if normalize_gtin(value)[0]:
+                return value, header
+    for header, value in values:
+        if value:
+            return value, header
+    return "", ""
+
+
+def map_row(fields: dict[str, str], mapping: dict[str, str | tuple[str, ...]]) -> MappedRow:
+    picked: dict[str, str] = {}
+
+    def get(field_name: str) -> str:
+        header = mapping.get(field_name)
+        if not header:
+            return ""
+        if isinstance(header, str):
+            return _value(fields, header)
+        value, used = _pick(fields, header, field_name)
+        if used:
+            picked[field_name] = used
+        return value
 
     part_number = get("part_number")
     if not part_number:
@@ -112,7 +160,17 @@ def map_row(fields: dict[str, str], mapping: dict[str, str]) -> MappedRow:
         description=get("description"),
         gtin=get("gtin"),
         cost_cents=parse_cost_cents(get("cost")),
+        picked=picked,
     )
+
+
+def row_identity(fields: dict[str, str], mapping: dict[str, str | tuple[str, ...]]) -> tuple[str, str] | None:
+    """(part number, brand) as the feed wrote them, or None when the row names no part. Cost is not looked at."""
+    number, brand = mapping.get("part_number"), mapping.get("brand")
+    part_number = _value(fields, number) if isinstance(number, str) else ""
+    if not part_number:
+        return None
+    return part_number, (_value(fields, brand) if isinstance(brand, str) else "")
 
 
 def content_hash(row: MappedRow) -> str:

@@ -4,24 +4,35 @@ Each batch is one transaction holding the rows it stored, the rejected rows, the
 checkpoint. A crash can therefore never leave a checkpoint ahead of its rows or rows without their
 count. A re-run starts at the checkpoint, and if it were to re-read rows anyway, the unique
 idempotency key and the "unchanged since the latest stored version" rule keep them from landing twice.
+
+For a supplier flagged `full_snapshot`, the batch also records which supplier parts the pass read (rows that
+did not change store no RawPart, so nothing else says a part is still listed), and a complete, succeeded pass
+ends by delisting what the feed no longer offers (catalog/snapshot.py).
 """
 from __future__ import annotations
 
 from django.db import transaction
+from django.utils import timezone
 
-from ..models import FeedCheckpoint, PipelineRun, RawPart, RejectedRow, Supplier
+from ..models import FeedCheckpoint, PipelineRun, RawPart, RejectedRow, SnapshotSeen, Supplier
 from ..runs import add_error, advisory_lock, finish_run, start_run
+from ..snapshot import apply_snapshot
 from .adapters import FeedAdapter, SourceGap, SourceRecord
 from .mapping import (
     MappedRow,
     RowRejected,
-    SchemaDriftError,
     content_hash,
+    doubled_columns,
     idempotency_key,
     map_row,
     resolve_headers,
+    row_identity,
     unmapped_columns,
 )
+
+# rejections that say nothing about WHICH part the row was: a pass holding one cannot prove what is missing
+UNREADABLE = frozenset({"column_count", "undecodable_bytes", "nul_character"})
+NUL = chr(0)
 
 
 class _Batch:
@@ -33,18 +44,18 @@ class _Batch:
         return len(self.records)
 
 
-def ingest(supplier: Supplier, adapter: FeedAdapter, batch_size: int = 1000) -> PipelineRun:
+def ingest(supplier: Supplier, adapter: FeedAdapter, batch_size: int = 1000, allow_mass_delist: bool = False) -> PipelineRun:
     source_ref = adapter.source_ref
     with advisory_lock(f"ingest:{supplier.code}:{source_ref}"):
         run = start_run(PipelineRun.Kind.INGEST, supplier, source_ref)
         try:
-            return _ingest_locked(supplier, adapter, run, batch_size)
+            return _ingest_locked(supplier, adapter, run, batch_size, allow_mass_delist)
         except Exception as exc:  # the batch in flight was rolled back; what was committed before stays
             add_error(run, "ingest", f"{type(exc).__name__}: {exc}")
             return finish_run(run, PipelineRun.Status.FAILED)
 
 
-def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, batch_size: int) -> PipelineRun:
+def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, batch_size: int, allow_mass_delist: bool) -> PipelineRun:
     checkpoint, _ = FeedCheckpoint.objects.get_or_create(supplier=supplier, source_ref=adapter.source_ref)
     fingerprint = adapter.fingerprint()
     run.notes["fingerprint"] = fingerprint
@@ -53,7 +64,9 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
         checkpoint.fingerprint = fingerprint
         checkpoint.position = 0
         checkpoint.completed = False
+        checkpoint.completed_at = None
         checkpoint.save()
+        SnapshotSeen.objects.filter(checkpoint=checkpoint).delete()  # a new pass starts with nothing seen
     elif checkpoint.completed:
         run.notes["skipped"] = "source unchanged since the last complete run"
         return finish_run(run, PipelineRun.Status.SUCCEEDED)
@@ -61,7 +74,7 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
     if start:
         run.notes["resumed_from"] = start
 
-    headers: set[str] = set()
+    headers: dict[str, None] = {}  # an ordered set: of two columns for one field, the left one comes first
     contiguous = True
     gap_seen = False
     batch = _Batch()
@@ -85,7 +98,7 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
             continue
         batch.records.append(item)
         if item.fields:
-            headers.update(item.fields)
+            headers.update(dict.fromkeys(item.fields))
         if len(batch) >= batch_size:
             flush()
     flush()
@@ -95,8 +108,12 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
     if gap_seen:
         return finish_run(run, PipelineRun.Status.PARTIAL)
     checkpoint.completed = True
+    checkpoint.completed_at = timezone.now()
     checkpoint.last_run = run
     checkpoint.save()
+    if supplier.full_snapshot:
+        # a complete, succeeded pass over a snapshot feed: whatever it did not list is no longer offered
+        run.notes["snapshot"] = apply_snapshot(supplier, allow_mass_delist=allow_mass_delist)
     return finish_run(run, PipelineRun.Status.SUCCEEDED)
 
 
@@ -105,26 +122,42 @@ def _store_batch(
     run: PipelineRun,
     checkpoint: FeedCheckpoint,
     records: list[SourceRecord],
-    headers: set[str],
+    headers: dict[str, None],
     advance_to: int | None,
 ) -> None:
     mapping = resolve_headers(headers) if headers else {}
     if headers:
         run.notes["unmapped_columns"] = unmapped_columns(headers, mapping)
+        if doubled_columns(mapping):
+            run.notes["doubled_columns"] = doubled_columns(mapping)
     mapped: list[tuple[SourceRecord, MappedRow, str]] = []
     rejected: list[RejectedRow] = []
+    seen: set[tuple[str, str]] = set()
     for rec in records:
         reason = rec.reject
         row = None
+        # a NUL cannot be stored in a text or JSON column: that row is refused, never the whole run
+        if not reason and any(NUL in value for value in rec.fields.values()):
+            reason = "nul_character"
         if not reason:
             try:
                 row = map_row(rec.fields, mapping)
             except RowRejected as exc:
                 reason = exc.reason
         if reason:
-            rejected.append(RejectedRow(run=run, supplier=supplier, position=rec.position, reason=reason, raw=rec.raw_text))
+            rejected.append(
+                RejectedRow(run=run, supplier=supplier, position=rec.position, reason=reason, raw=rec.raw_text.replace(NUL, "�"))
+            )
+            if reason in UNREADABLE:
+                seen.add(("", ""))
+            elif (identity := row_identity(rec.fields, mapping)) is not None:
+                seen.add(identity)
         else:
             mapped.append((rec, row, content_hash(row)))
+            seen.add((row.part_number, row.brand))
+            for name, header in row.picked.items():
+                counts = run.notes.setdefault("column_choices", {}).setdefault(name, {})
+                counts[header] = counts.get(header, 0) + 1
 
     part_numbers = {row.part_number for _, row, _ in mapped}
     keys = {
@@ -164,6 +197,10 @@ def _store_batch(
             )
         RawPart.objects.bulk_create(to_insert)
         RejectedRow.objects.bulk_create(rejected)
+        if supplier.full_snapshot and seen:
+            SnapshotSeen.objects.bulk_create(
+                [SnapshotSeen(checkpoint=checkpoint, part_number_raw=n, brand_raw=b) for n, b in seen], ignore_conflicts=True
+            )
         counts = {
             "rows_read": run.rows_read + len(records),
             "rows_written": run.rows_written + len(to_insert),
