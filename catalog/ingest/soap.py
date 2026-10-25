@@ -10,6 +10,7 @@ from zeep.transports import Transport
 
 from .paged import FatalError, PagedAdapter, PermanentError, TransientError
 from .redact import identity_url, query_values
+from .transport import CONFIG_CODE, CONFIG_PHRASE, classify
 
 TRANSIENT_FAULTS = ("server.busy", "server.unavailable", "server.timeout")
 
@@ -44,8 +45,11 @@ class SoapAdapter(PagedAdapter):
             if exc.status_code == 429 or exc.status_code >= 500:
                 raise TransientError(f"HTTP {exc.status_code}") from exc
             raise PermanentError(f"HTTP {exc.status_code}") from exc
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            raise TransientError(type(exc).__name__) from exc
+        except requests.exceptions.RequestException as exc:  # see transport.py: transient, or a fixed phrase
+            outcome = classify(exc)
+            if not outcome.transient:
+                raise FatalError(f"{CONFIG_CODE}: {CONFIG_PHRASE}") from None
+            raise TransientError(outcome.name) from exc
         data = serialize_object(result, target_cls=dict)
         items = data.get("item") or []
         return [dict(i) for i in items], data.get("total")

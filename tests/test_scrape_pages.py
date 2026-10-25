@@ -5,6 +5,7 @@ were closed) and nothing was cut. Anything else is a coded gap, so the run is pa
 completes the checkpoint. Pages here are served from memory (`PageSession`), so a body can be cut at any byte.
 """
 import random
+import re
 
 import pytest
 
@@ -454,3 +455,164 @@ def test_a_walk_read_again_after_a_partial_one_stores_nothing_twice():
     second = ingest(supplier, adapter_for(route))
     assert (first.rows_written, second.rows_written, second.rows_unchanged) == (1, 1, 1)
     assert RawPart.objects.count() == 2
+
+
+# ---- F3: every error `requests` raises while a page is fetched or read is a coded outcome --------------------------------------
+
+
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+import requests  # noqa: E402
+
+
+# what retrying cannot change: the test's own statement of the split, not read from the adapter
+CONFIG = tuple(
+    getattr(requests.exceptions, name)
+    for name in ("InvalidURL", "InvalidProxyURL", "InvalidSchema", "MissingSchema", "InvalidHeader", "InvalidJSONError", "JSONDecodeError",
+                 "URLRequired", "UnrewindableBodyError", "TooManyRedirects")
+)
+
+
+def every_request_exception():
+    """EVERY subclass of RequestException that exists in the installed `requests`, found by walking the class tree."""
+    found, todo = set(), [requests.exceptions.RequestException]
+    while todo:
+        for sub in todo.pop().__subclasses__():
+            if sub not in found:
+                found.add(sub)
+                todo.append(sub)
+    return sorted(found | {requests.exceptions.RequestException}, key=lambda c: c.__name__)
+
+
+def build_exception(cls):
+    for args in ((), ("boom: http://proxyuser:Sup3rS3cret@proxy.example:3128",), ("msg", "doc", 0)):
+        try:
+            return cls(*args)
+        except TypeError:
+            continue
+    raise AssertionError(f"cannot build {cls.__name__}")
+
+
+class RaisingSession(PageSession):
+    """Serves the route, and raises `exc` for the request at `page` (every try, or only the first `times`)."""
+
+    def __init__(self, route, exc, page=1, times=None):
+        super().__init__(route)
+        self.exc, self.page, self.times, self.raised = exc, page, times, 0
+
+    def request(self, method, url, **kwargs):
+        if f"page={self.page}" in url and (self.times is None or self.raised < self.times):
+            self.raised += 1
+            self.log.append(url)
+            raise self.exc
+        return super().request(method, url, **kwargs)
+
+
+def adapter_raising(exc, page=1, times=None, **changes):
+    clock = Clock()
+    base = dict(start_url=f"{BASE}/catalog?page=1", delay_seconds=0.0, respect_robots=False, max_retries=2, backoff_base=0.1, backoff_cap=1.0)
+    base.update(changes)
+    session = RaisingSession(catalog(6), exc, page, times)
+    return ScrapeAdapter(ScrapeConfig(**base), session=session, sleep=clock.sleep, clock=clock.time, jitter=lambda d: d), session
+
+
+@pytest.mark.parametrize("cls", every_request_exception(), ids=lambda c: c.__name__)
+@pytest.mark.parametrize("page", [1, 2])
+@pytest.mark.parametrize("proxied", [False, True], ids=["direct", "proxy"])
+def test_every_exception_requests_can_raise_is_a_coded_gap_or_a_failure_with_a_fixed_phrase(cls, page, proxied):
+    """The class (property over the subclasses): nothing `requests` raises escapes as an uncoded traceback, and no text of it is stored."""
+    adapter, session = adapter_raising(build_exception(cls), page=page, **({"proxies": ["http://127.0.0.1:3128"]} if proxied else {}))
+    out, failure = [], None
+    try:
+        for item in adapter.records():
+            out.append(item)
+    except FatalError as exc:
+        failure = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        raise AssertionError(f"{cls.__name__} escaped as {type(exc).__name__}: {exc}")
+    if failure is not None:
+        assert failure.startswith("E_REQUEST_INVALID: ") and "Sup3rS3cret" not in failure and "boom" not in failure
+        assert issubclass(cls, CONFIG)
+    else:
+        assert not issubclass(cls, CONFIG)
+        end = [g for g in out if isinstance(g, SourceGap)]
+        assert len(end) == 1 and out[-1] is end[0] and re.match(r"E_[A-Z_]+: ", end[0].message)
+        assert "Sup3rS3cret" not in end[0].message and "boom" not in end[0].message
+        refused = issubclass(cls, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+        want = "E_PAGE_TRUNCATED" if issubclass(cls, requests.exceptions.ChunkedEncodingError) else (
+            "E_PAGE_ENCODING" if issubclass(cls, requests.exceptions.ContentDecodingError) else (
+                ("E_PROXY_UNAVAILABLE" if proxied else "E_UNREACHABLE") if refused else "E_TRANSPORT"))
+        assert end[0].message.startswith(want + ": "), (cls.__name__, end[0].message)
+        assert [r.fields["Part No"] for r in rows(out)] == [part(i)[0] for i in range(1, 4)][: 3 * (page - 1)]  # earlier pages are kept
+        assert session.log.count(f"{BASE}/catalog?page={page}") == 3  # tried, then twice more with the backoff
+
+
+class CutSite:
+    """A site on 127.0.0.1 whose page 2 is cut after its headers: a short Content-Length body, or a chunked body that stops mid chunk."""
+
+    def __init__(self, mode):
+        self.mode, self.hits = mode, {1: 0, 2: 0}
+        site = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                page = int(self.path.rsplit("page=", 1)[1])
+                site.hits[page] += 1
+                if page == 1:
+                    body = products_table([part(i) for i in (1, 2, 3)], nxt='<a rel="next" href="/catalog?page=2">Next</a>').encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                body = products_table([part(i) for i in (4, 5, 6)]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                if site.mode == "length":
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body[: len(body) // 2])
+                else:
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(f"{len(body):x}\r\n".encode() + body[: len(body) // 2])
+                self.wfile.flush()
+                self.close_connection = True
+                self.connection.shutdown(2)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.mark.parametrize("mode", ["length", "chunked"])
+def test_a_body_cut_after_the_headers_is_retried_then_a_gap_that_keeps_the_pages_before_it(mode):
+    site = CutSite(mode)
+    try:
+        clock = Clock()
+        cfg = ScrapeConfig(start_url=f"{site.url}/catalog?page=1", delay_seconds=0.0, respect_robots=False, max_retries=2, backoff_base=0.1, backoff_cap=1.0)
+        run = ingest(snapshot_supplier("cut"), ScrapeAdapter(cfg, sleep=clock.sleep, clock=clock.time, jitter=lambda d: d))
+    finally:
+        site.close()
+    assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_PAGE_TRUNCATED")
+    assert "ChunkedEncodingError" in run.errors[0]["message"] and "IncompleteRead" not in run.errors[0]["message"]
+    assert sorted(RawPart.objects.values_list("part_number_raw", flat=True)) == [part(i)[0] for i in (1, 2, 3)]
+    assert site.hits == {1: 1, 2: 3}  # the cut page was asked for again with the existing backoff, twice
+    assert not FeedCheckpoint.objects.get().completed and live_listings(snapshot_supplier("cut")) == 0
+
+
+def test_a_cut_that_heals_on_the_retry_is_read_as_if_nothing_had_happened():
+    adapter, session = adapter_raising(requests.exceptions.ChunkedEncodingError("cut"), page=2, times=1)
+    out = records(adapter)
+    assert codes(out) == [] and len(rows(out)) == 6 and adapter.notes()["retries"] == 1

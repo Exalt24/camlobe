@@ -58,6 +58,7 @@ from .adapters import SourceGap, SourceRecord
 from .paged import FatalError
 from .redact import identity_url, query_values, userinfo_secrets
 from .rest import _retry_after
+from .transport import CONFIG_CODE, CONFIG_PHRASE, classify
 
 DEFAULT_USER_AGENT = "camlobe-feed/1.0 (supplier catalog ingest)"
 DEFAULT_CHALLENGE_MARKERS = (
@@ -585,8 +586,8 @@ class ScrapeAdapter:
         if not self._proxies:
             try:
                 return self.session.request(method, url, **kwargs)
-            except (requests.Timeout, requests.ConnectionError) as exc:
-                raise _Transient("E_UNREACHABLE", type(exc).__name__) from exc
+            except requests.exceptions.RequestException as exc:
+                raise self._refused(exc) from exc
         if len(self._dead) >= len(self._proxies):
             self._dead.clear()  # every proxy failed earlier: a retry tries them all again, one may be back
         for index, proxy in enumerate(self._proxies):
@@ -598,9 +599,19 @@ class ScrapeAdapter:
                 self._dead.add(index)  # this proxy refused or dropped the connection: the next one carries the request
                 self._stats["proxy_failovers"] += 1
                 continue
+            except requests.exceptions.RequestException as exc:  # not the proxy's fault: a cut body, an invalid URL
+                raise self._refused(exc) from exc
             self._stats["proxy"] = index
             return response
         raise _Transient("E_PROXY_UNAVAILABLE", "every proxy refused the connection")
+
+    @staticmethod
+    def _refused(exc: requests.exceptions.RequestException) -> Exception:
+        """Any error `requests` raises, as the run's own outcome (see transport.py): retried, or a fixed phrase."""
+        outcome = classify(exc)
+        if outcome.transient:
+            return _Transient(outcome.code, outcome.name)  # the class name only, never the text of the exception
+        return _Stop(CONFIG_CODE, CONFIG_PHRASE, fatal=True)
 
     def _throttle(self) -> None:
         pause = max(self.cfg.delay_seconds, self._crawl_delay)

@@ -80,6 +80,7 @@ TARGETS = {
     "snapshot": ROOT / "catalog" / "snapshot.py",
     "scrape": ROOT / "catalog" / "ingest" / "scrape.py",
     "redact": ROOT / "catalog" / "ingest" / "redact.py",
+    "transport": ROOT / "catalog" / "ingest" / "transport.py",
     "pagination": ROOT / "catalog" / "api" / "pagination.py",
 }
 
@@ -462,6 +463,13 @@ MUTANTS: list[Mutant] = [
     # F2: a pass that has not finished never replaces the latest completed pass
     D("runner: a finished pass does not promote what it read", "runner", "_ingest_locked", "delete the call statement", ".update(staging=False)", DELIST),
     D("snapshot: the match step reads a pass that has not finished", "snapshot", "seen_listing_keys", "False -> True", "staging=False", DELIST),
+    # F3: every error requests raises while a page is fetched or read is a coded outcome (transient: retried, then a gap)
+    D("scrape: a transient error ends the run instead of being retried", "scrape", "_refused", "negate the condition", "if outcome.transient", PAGES),
+    D("rest: a configuration error is retried as if it were transient", "rest", "fetch_page", "negate the condition", "if not outcome.transient", REMOTE),
+    D("soap: a configuration error is retried as if it were transient", "soap", "fetch_page", "negate the condition", "if not outcome.transient", REMOTE),
+    D("transport: a configuration error is not told from a transient one", "transport", "classify", "negate the condition", "isinstance(exc, CONFIG_ERRORS)", PAGES, REMOTE),
+    D("transport: a body cut after the headers is not E_PAGE_TRUNCATED", "transport", "classify", "negate the condition", "rx.ChunkedEncodingError", PAGES),
+    D("transport: a body that does not decode is not E_PAGE_ENCODING", "transport", "classify", "negate the condition", "rx.ContentDecodingError", PAGES),
 ]
 
 

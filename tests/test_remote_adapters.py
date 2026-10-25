@@ -1,8 +1,10 @@
 """REST, SOAP and SFTP adapters against local fake servers, all the way through the ingest runner."""
+import json
 import socket
 
 import paramiko
 import pytest
+import requests
 
 from catalog.ingest.adapters import FileAdapter
 from catalog.ingest.rest import RestAdapter
@@ -392,3 +394,86 @@ def test_rest_a_json_answer_is_utf8_whatever_its_content_type_says(content_type)
     run = ingest(get_supplier("j"), RestAdapter("http://api.test/catalog", session=_StubSession(content_type, items)))
     stored = RawPart.objects.get()
     assert run.status == PipelineRun.Status.SUCCEEDED and (stored.brand_raw, stored.description_raw) == ("Würth", "Bremsscheibe für Ø 280 mm")
+
+
+# ---- second output round: every error `requests` raises is a coded outcome for REST and SOAP too ----------------------------------
+
+
+def request_exceptions():
+    found, todo = set(), [requests.exceptions.RequestException]
+    while todo:
+        for sub in todo.pop().__subclasses__():
+            if sub not in found:
+                found.add(sub)
+                todo.append(sub)
+    return sorted(found | {requests.exceptions.RequestException}, key=lambda c: c.__name__)
+
+
+NOT_RETRIABLE = tuple(
+    getattr(requests.exceptions, name)
+    for name in ("InvalidURL", "InvalidProxyURL", "InvalidSchema", "MissingSchema", "InvalidHeader", "InvalidJSONError", "JSONDecodeError",
+                 "URLRequired", "UnrewindableBodyError", "TooManyRedirects")
+)
+
+
+def make_exception(cls):
+    for args in ((), ("boom Sup3rS3cret",), ("msg", "doc", 0)):
+        try:
+            return cls(*args)
+        except TypeError:
+            continue
+    raise AssertionError(cls)
+
+
+class JsonSession:
+    """Stands in for requests.Session on a paged JSON source: raises `exc` for the page at offset `bad`, serves the others."""
+
+    def __init__(self, items, bad, exc, seen=None):
+        self.items, self.bad, self.exc, self.calls = items, bad, exc, 0
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        offset, limit = params["offset"], params["limit"]
+        if offset == self.bad:
+            self.calls += 1
+            raise self.exc
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({"items": self.items[offset : offset + limit], "total": len(self.items)}).encode()
+        return response
+
+
+@pytest.mark.parametrize("cls", request_exceptions(), ids=lambda c: c.__name__)
+def test_rest_every_exception_requests_can_raise_is_a_gap_or_a_failure_with_a_fixed_phrase(cls):
+    session = JsonSession(catalog_items(250), 100, make_exception(cls))
+    run = ingest(get_supplier(), RestAdapter("https://feeds.example/catalog", page_size=100, session=session, sleep=NoSleep(), max_retries=1))
+    text = json.dumps([run.errors, run.notes])
+    assert "Sup3rS3cret" not in text and "boom" not in text
+    if issubclass(cls, NOT_RETRIABLE):
+        assert run.status == PipelineRun.Status.FAILED and "E_REQUEST_INVALID" in run.errors[-1]["message"] and session.calls == 1
+    else:
+        assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["where"] == "positions 101-200"
+        assert run.rows_written == 150 and session.calls == 2  # the page was tried again, and the pages around it are kept
+
+
+@pytest.mark.parametrize("cls", request_exceptions(), ids=lambda c: c.__name__)
+def test_soap_every_exception_requests_can_raise_is_a_gap_or_a_failure_with_a_fixed_phrase(cls, soap):
+    from types import SimpleNamespace
+
+    _, wsdl = soap(Behaviour(catalog_items(150)))
+    adapter = SoapAdapter(wsdl, page_size=50, sleep=NoSleep(), max_retries=1)
+    calls = []
+
+    def operation(offset, limit):
+        calls.append(offset)
+        if offset == 50:
+            raise make_exception(cls)
+        return {"total": 150, "item": [dict(i) for i in catalog_items(150)[offset : offset + limit]]}
+
+    adapter.client = SimpleNamespace(service=SimpleNamespace(GetCatalogPage=operation))
+    run = ingest(get_supplier(), adapter)
+    assert "Sup3rS3cret" not in json.dumps([run.errors, run.notes])
+    if issubclass(cls, NOT_RETRIABLE):
+        assert run.status == PipelineRun.Status.FAILED and "E_REQUEST_INVALID" in run.errors[-1]["message"] and calls.count(50) == 1
+    else:
+        assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["where"] == "positions 51-100"
+        assert run.rows_written == 100 and calls.count(50) == 2

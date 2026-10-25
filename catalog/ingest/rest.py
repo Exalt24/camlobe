@@ -6,6 +6,7 @@ import json
 import requests
 
 from .paged import FatalError, PagedAdapter, PermanentError, TransientError
+from .transport import CONFIG_CODE, CONFIG_PHRASE, classify
 
 
 def _retry_after(response: requests.Response) -> float | None:
@@ -44,8 +45,11 @@ class RestAdapter(PagedAdapter):
             response = self.session.get(
                 self.url, params={"offset": offset, "limit": limit}, headers=self.headers, timeout=self.timeout
             )
-        except (requests.Timeout, requests.ConnectionError) as exc:
-            raise TransientError(f"{type(exc).__name__}") from exc
+        except requests.exceptions.RequestException as exc:  # every one: a cut body is as transient as a refused connection
+            outcome = classify(exc)
+            if not outcome.transient:
+                raise FatalError(f"{CONFIG_CODE}: {CONFIG_PHRASE}") from None
+            raise TransientError(outcome.name) from exc
         status = response.status_code
         if status in (401, 403):
             raise FatalError(f"HTTP {status}: the source refused our credentials")
