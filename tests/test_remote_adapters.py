@@ -335,3 +335,27 @@ def test_a_downloaded_file_reads_exactly_like_the_same_local_file(sftp, tmp_path
     assert remote.fingerprint() == FileAdapter(local).fingerprint()
     assert [r.fields for r in remote.records()] == [r.fields for r in FileAdapter(local).records()]
     remote.cleanup()
+
+
+# ---- a repeated page, and a capped page with no total -----------------------------------------------
+
+
+def test_rest_a_repeated_page_ends_the_run_as_a_gap_with_a_code(rest):
+    _, url = rest(Behaviour(catalog_items(250), serve_as={100: 0}))
+    run = ingest(get_supplier(), RestAdapter(url, page_size=100))
+    assert run.status == PipelineRun.Status.PARTIAL and run.rows_written == 150
+    assert run.errors[0]["message"].startswith("E_PAGE_REPEATED") and run.errors[0]["where"] == "positions 101-200"
+
+
+@pytest.mark.parametrize("kind", ["rest", "soap"])
+def test_a_server_that_caps_its_page_size_and_sends_no_total_is_still_read_whole(kind, rest, soap):
+    behaviour = Behaviour(catalog_items(250), cap=50, hide_total=True)
+    if kind == "rest":
+        _, url = rest(behaviour)
+        adapter = RestAdapter(url, page_size=100)
+    else:
+        _, url = soap(behaviour)
+        adapter = SoapAdapter(url, page_size=100)
+    run = ingest(get_supplier(), adapter)
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 250
+    assert RawPart.objects.count() == 250 and FeedCheckpoint.objects.get().position == 250

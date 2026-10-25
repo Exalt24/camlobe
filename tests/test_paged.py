@@ -196,3 +196,60 @@ def test_gaps_name_exactly_the_positions_that_are_missing(n, page, bad_pages):
 
 def test_flatten_nested_and_none():
     assert flatten({"a": 1, "b": None, "c": {"d": "x", "e": {"f": 2}}}) == {"a": "1", "b": "", "c.d": "x", "c.e.f": "2"}
+
+
+# ---- a repeated page, and a server that gives no total ---------------------------------------------
+
+
+def gaps(out):
+    return [r for r in out if isinstance(r, SourceGap)]
+
+
+class Repeating(Scripted):
+    """The server answers `serve_as[offset]`'s page when asked for `offset`."""
+
+    def __init__(self, items, serve_as, **kw):
+        super().__init__(items, **kw)
+        self.serve_as = serve_as
+
+    def fetch_page(self, offset, limit):
+        return super().fetch_page(self.serve_as.get(offset, offset), limit)
+
+
+def test_a_page_that_repeats_an_earlier_page_is_a_gap_with_a_code_and_is_not_read_again():
+    out = read(Repeating(items(250), {100: 0}, page_size=100))
+    (gap,) = gaps(out)
+    assert gap.message.startswith("E_PAGE_REPEATED") and (gap.first_position, gap.last_position) == (101, 200)
+    assert positions(out) == list(range(1, 101)) + list(range(201, 251))  # the repeated items are not yielded under new positions
+
+
+def test_a_repeat_of_a_page_further_back_is_found_too():
+    out = read(Repeating(items(400), {300: 100}, page_size=100))
+    assert [g.message[:15] for g in gaps(out)] == ["E_PAGE_REPEATED"] and positions(out)[-1] == 300
+
+
+def test_a_server_that_repeats_pages_for_good_stops_the_run():
+    with pytest.raises(FatalError, match="pages in a row failed"):
+        read(Repeating(items(900), {100: 0, 200: 0, 300: 0}, page_size=100))
+
+
+def test_a_repeated_page_with_no_total_stops_the_run_since_the_end_cannot_be_found():
+    with pytest.raises(FatalError, match="E_PAGE_REPEATED"):
+        read(Repeating(items(300), {100: 0, 200: 0}, page_size=100, total=False))
+
+
+def test_different_pages_and_one_item_pages_that_happen_to_match_are_not_repeats():
+    duplicated = [{"sku": "AB0001"}, {"sku": "AB0001"}, {"sku": "AB0002"}]  # a feed may list the same row twice
+    assert gaps(read(Scripted(duplicated, page_size=1))) == []
+    assert gaps(read(Scripted(items(250), page_size=100))) == []
+
+
+def test_a_server_that_caps_its_pages_and_sends_no_total_is_read_to_the_empty_page():
+    class Capped(Scripted):
+        def fetch_page(self, offset, limit):
+            return super().fetch_page(offset, min(limit, 4))
+
+    a = Capped(items(30), page_size=10, total=False)
+    out = read(a)
+    assert positions(out) == list(range(1, 31)) and gaps(out) == []
+    assert [c[0] for c in a.calls] == [0, 4, 8, 12, 16, 20, 24, 28, 30]  # each request starts where the last answer ended

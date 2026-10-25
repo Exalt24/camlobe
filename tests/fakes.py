@@ -20,8 +20,9 @@ import paramiko
 class Behaviour:
     """What the fake does per offset. `script[offset]` is a list of statuses served before a normal answer."""
 
-    def __init__(self, items, script=None, always=None, cap=None, token=None, retry_after=None, hide_total=False):
+    def __init__(self, items, script=None, always=None, cap=None, token=None, retry_after=None, hide_total=False, serve_as=None):
         self.items = items
+        self.serve_as = dict(serve_as or {})  # offset -> the offset whose page is served instead (a server that repeats a page)
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.always = dict(always or {})  # offset -> status, forever
         self.cap = cap  # largest page the server will give, whatever the client asks
@@ -42,6 +43,7 @@ class Behaviour:
             if queue:
                 return queue.pop(0), None
         size = min(limit, self.cap) if self.cap else limit
+        offset = self.serve_as.get(offset, offset)
         return 200, self.items[offset : offset + size]
 
 

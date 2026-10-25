@@ -12,10 +12,16 @@ fetch one page. The rules:
   - a 401 or 403 stops the run at once, because every page would fail the same way;
   - three failed pages in a row mean the endpoint is down, and the run stops instead of producing gaps forever;
   - a page shorter than asked, in the middle of a set whose total is known, stops the run: the server capped
-    the page size, and carrying on would skip rows silently.
+    the page size, and carrying on would skip rows silently;
+  - when the total is NOT known, a short page proves nothing (the server may cap its pages), so paging goes on,
+    each request starting where the last answer ended, until a page comes back empty;
+  - a page whose items are exactly those of a page already read in this run (a server that answers every offset
+    with page 0, a cache in front of it) is a gap coded E_PAGE_REPEATED: its rows are not stored a second time and
+    the rows that belong at that offset are missing, so the run must not look complete.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import time
@@ -24,6 +30,8 @@ from typing import Callable, Iterator
 from .adapters import SourceGap, SourceRecord
 
 MAX_CONSECUTIVE_FAILED_PAGES = 3
+MIN_ITEMS_TO_CALL_A_REPEAT = 2  # a one item page can match an earlier one when a feed lists the same row twice
+MAX_PAGES = 100_000  # with no total, a server that never answers an empty page would otherwise be read for ever
 
 
 class TransientError(Exception):
@@ -42,6 +50,10 @@ class FatalError(Exception):
 
 class PageFailed(Exception):
     pass
+
+
+def page_identity(items: list[dict]) -> str:
+    return hashlib.sha256(json.dumps(items, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def flatten(item: dict, prefix: str = "") -> dict[str, str]:
@@ -126,7 +138,12 @@ class PagedAdapter:
         offset = (start_after // self.page_size) * self.page_size
         total: int | None = None
         failed_in_a_row = 0
+        seen_pages: dict[str, int] = {}  # page identity -> the offset it was first read at
+        pages = 0
         while total is None or offset < total:
+            pages += 1
+            if pages > MAX_PAGES:
+                raise FatalError(f"more than {MAX_PAGES} pages and no end: the source does not stop")
             try:
                 items, page_total = self._fetch_with_retry(offset)
             except PageFailed as exc:
@@ -138,9 +155,26 @@ class PagedAdapter:
                 yield SourceGap(offset + 1, last, str(exc))
                 offset += self.page_size
                 continue
-            failed_in_a_row = 0
             if page_total is not None:
                 total = page_total
+            identity = page_identity(items) if len(items) >= MIN_ITEMS_TO_CALL_A_REPEAT else ""
+            if identity and identity in seen_pages:
+                message = (
+                    f"E_PAGE_REPEATED: the page at offset {offset} is the page read at offset {seen_pages[identity]} again, "
+                    f"so the rows that belong at {offset + 1} and after are missing"
+                )
+                self._stats["failed_pages"].append(offset)
+                if total is None:
+                    raise FatalError(f"{message}; with no total the end of the set cannot be found")
+                failed_in_a_row += 1
+                if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_PAGES:
+                    raise FatalError(f"{failed_in_a_row} pages in a row failed; the endpoint looks down: {message}")
+                yield SourceGap(offset + 1, min(total, offset + self.page_size), message)
+                offset += self.page_size
+                continue
+            failed_in_a_row = 0  # a page that is new, whatever fetch or repeat came before it
+            if identity:
+                seen_pages[identity] = offset
             short = len(items) < self.page_size
             if short and total is not None and offset + len(items) < total:
                 raise FatalError(
@@ -151,6 +185,7 @@ class PagedAdapter:
                 position = offset + i + 1
                 if position > start_after:
                     yield SourceRecord(position, flatten(item), json.dumps(item, default=str)[:2000])
-            if short:
+            if not items or (short and total is not None):
                 break
-            offset += self.page_size
+            # a known total with full pages steps by the page size; with no total the next page starts where this one ended
+            offset += self.page_size if total is not None else len(items)
