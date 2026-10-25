@@ -155,3 +155,70 @@ def test_edi_commands_refuse_bad_input(catalog, tmp_path):
         call_command("edi_parse", str(bad))
     with pytest.raises(CommandError, match="cannot read"):
         call_command("edi_parse", str(tmp_path / "missing.edi"))
+
+
+# ---- one part on two lines, and the order command's errors ------------------------------------------
+
+
+def two_lines():
+    from catalog.edi.x12 import Line, PurchaseOrder
+
+    return PurchaseOrder("PO-9", DATE, (Line("1", 5, "EA", 100, "VP", "P1"), Line("2", 5, "EA", 100, "VP", "P1")))
+
+
+def shipment(*quantities, part="P1"):
+    return Asn("S", DATE, (AsnOrder("PO-9", tuple(AsnItem("VP", part, q, "EA") for q in quantities)),))
+
+
+def invoice_for(po, *lines):
+    from catalog.edi.x12 import Line
+
+    built = tuple(Line(str(n), q, "EA", price, "VP", "P1") for n, (q, price) in enumerate(lines, start=1))
+    return Invoice("I1", DATE, "PO-9", built, sum(ln.qty * ln.unit_price_cents for ln in built))
+
+
+def test_one_part_on_two_lines_shipped_in_full_is_not_an_overshipment():
+    po = two_lines()
+    assert reconcile(po, asn=shipment(5, 5)) == []
+    assert reconcile(po, asn=shipment(10)) == []  # one box for both lines
+    assert reconcile(po, asn=shipment(3, 4, 3)) == []  # in any split of the same ten
+
+
+def test_shipping_more_than_both_lines_ordered_is_one_overshipment_on_the_last_line():
+    found = reconcile(two_lines(), asn=shipment(5, 6))
+    assert [(d.code, d.detail) for d in found] == [("ASN_OVERSHIP", "line 2: 6 shipped against 5 ordered")]
+    assert [d.code for d in reconcile(two_lines(), asn=shipment(5, 5, 1))] == ["ASN_OVERSHIP"]
+
+
+def test_a_part_on_two_lines_is_invoiced_by_what_was_shipped_on_each():
+    po = two_lines()
+    assert reconcile(po, asn=shipment(8), invoice=invoice_for(po, (5, 100), (3, 100))) == []
+    found = reconcile(po, asn=shipment(8), invoice=invoice_for(po, (5, 100), (5, 100)))
+    assert [(d.code, d.detail) for d in found] == [("INVOICE_QTY_OVER_SHIPPED", "line 2: invoiced 5, shipped 3")]
+    over = reconcile(po, invoice=invoice_for(po, (5, 100), (6, 100)))
+    assert [(d.code, d.detail) for d in over] == [("INVOICE_QTY_OVER_ORDER", "line 2: invoiced 6, ordered 5")]
+    assert [d.code for d in reconcile(po, invoice=invoice_for(po, (10, 120)))] == ["INVOICE_PRICE", "INVOICE_PRICE"]  # both lines were ordered at 100
+
+
+def test_one_line_invoiced_in_two_pieces_still_adds_up_against_the_order():
+    from catalog.edi.x12 import Line, PurchaseOrder
+
+    po = PurchaseOrder("PO-9", DATE, (Line("1", 4, "EA", 100, "VP", "P1"),))
+    assert reconcile(po, invoice=invoice_for(po, (2, 100), (2, 100))) == []
+    assert [d.code for d in reconcile(po, invoice=invoice_for(po, (3, 100), (3, 100)))] == ["INVOICE_QTY_OVER_ORDER"]
+
+
+def test_edi_po_prints_a_coded_error_and_no_traceback(catalog):
+    with pytest.raises(CommandError, match="E_ELEMENT_LENGTH"):
+        call_command("edi_po", "redline", f"{catalog['H4123A']}:1", "--po", "P" * 23)
+    with pytest.raises(CommandError, match="E_ELEMENT_TYPE"):
+        call_command("edi_po", "redline", f"{catalog['H4123A']}:1", "--po", "PO-1", "--ship-to", "東京")
+
+
+def test_edi_po_transliterates_an_accented_ship_to_and_accepts_a_supplier_code_with_a_hyphen(catalog, capsys, tmp_path):
+    call_command("edi_po", "redline", f"{catalog['H4123A']}:1", "--po", "PO-1", "--ship-to", "Müller Autoteile")
+    assert "N1*ST*Muller Autoteile~" in capsys.readouterr().out
+    # a supplier code is a slug and may hold hyphens and underscores, which an interchange id may not
+    run_all(get_supplier("red-line_2"), write_csv(tmp_path / "h.csv", [row("H9100A", "Marlow", "Oil filter", "9.00")]))
+    call_command("edi_po", "red-line_2", f"{Part.objects.get(number_norm='H9100A').pk}:1", "--po", "PO-2")
+    assert "ISA*" in capsys.readouterr().out

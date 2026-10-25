@@ -58,10 +58,34 @@ class Discrepancy:
     detail: str
 
 
+def _allocate(by_part: dict[str, list[Line]], part_number: str, qty: int, taken: dict[str, int]) -> list[tuple[Line, int]]:
+    """Split `qty` of a part over the order lines that carry it, in line order, each up to what it ordered.
+
+    `taken` is what the same document has already put on each line. Whatever is left after every line is full
+    lands on the last line, so an over-shipment or over-invoice shows on a line instead of vanishing. A part on one
+    line is the simple case of the same rule.
+    """
+    lines = by_part[part_number]
+    out: list[tuple[Line, int]] = []
+    left = qty
+    for line in lines:
+        give = min(left, max(line.qty - taken.get(line.line_id, 0), 0))
+        if give:
+            out.append((line, give))
+            taken[line.line_id] = taken.get(line.line_id, 0) + give
+            left -= give
+    if left:
+        out.append((lines[-1], left))
+        taken[lines[-1].line_id] = taken.get(lines[-1].line_id, 0) + left
+    return out
+
+
 def reconcile(po: PurchaseOrder, ack: PoAck | None = None, asn: Asn | None = None, invoice: Invoice | None = None) -> list[Discrepancy]:
     found: list[Discrepancy] = []
     by_line = {ln.line_id: ln for ln in po.lines}
-    by_part = {ln.part_number: ln for ln in po.lines}
+    by_part: dict[str, list[Line]] = {}
+    for ln in po.lines:
+        by_part.setdefault(ln.part_number, []).append(ln)
     if ack is not None:
         if ack.po_number != po.po_number:
             found.append(Discrepancy("ACK_WRONG_PO", f"the acknowledgement is for {ack.po_number}, not {po.po_number}"))
@@ -92,26 +116,30 @@ def reconcile(po: PurchaseOrder, ack: PoAck | None = None, asn: Asn | None = Non
                 found.append(Discrepancy("ASN_WRONG_PO", f"the shipment lists order {order.po_number}, not {po.po_number}"))
                 continue
             for item in order.items:
-                line = by_part.get(item.part_number)
-                if line is None:
+                if item.part_number not in by_part:
                     found.append(Discrepancy("ASN_UNKNOWN_PART", f"{item.part_number} was shipped but is not on the order"))
                     continue
-                shipped[line.line_id] = shipped.get(line.line_id, 0) + item.qty
+                _allocate(by_part, item.part_number, item.qty, shipped)
         for line_id, qty in shipped.items():
             if qty > by_line[line_id].qty:
                 found.append(Discrepancy("ASN_OVERSHIP", f"line {line_id}: {qty} shipped against {by_line[line_id].qty} ordered"))
     if invoice is not None:
         if invoice.po_number != po.po_number:
             found.append(Discrepancy("INVOICE_WRONG_PO", f"the invoice is for {invoice.po_number}, not {po.po_number}"))
+        invoiced: dict[str, int] = {}
+        priced: set[str] = set()
         for inv in invoice.lines:
-            line = by_part.get(inv.part_number)
-            if line is None:
+            if inv.part_number not in by_part:
                 found.append(Discrepancy("INVOICE_UNKNOWN_PART", f"{inv.part_number} is invoiced but not on the order"))
                 continue
-            if inv.unit_price_cents != line.unit_price_cents:
-                found.append(Discrepancy("INVOICE_PRICE", f"line {line.line_id}: ordered at {line.unit_price_cents}, invoiced at {inv.unit_price_cents} cents"))
-            if inv.qty > line.qty:
-                found.append(Discrepancy("INVOICE_QTY_OVER_ORDER", f"line {line.line_id}: invoiced {inv.qty}, ordered {line.qty}"))
-            if asn is not None and inv.qty > shipped.get(line.line_id, 0):
-                found.append(Discrepancy("INVOICE_QTY_OVER_SHIPPED", f"line {line.line_id}: invoiced {inv.qty}, shipped {shipped.get(line.line_id, 0)}"))
+            for line, _ in _allocate(by_part, inv.part_number, inv.qty, invoiced):
+                if inv.unit_price_cents != line.unit_price_cents and line.line_id not in priced:
+                    priced.add(line.line_id)
+                    found.append(Discrepancy("INVOICE_PRICE", f"line {line.line_id}: ordered at {line.unit_price_cents}, invoiced at {inv.unit_price_cents} cents"))
+        for line in po.lines:
+            qty = invoiced.get(line.line_id, 0)
+            if qty > line.qty:
+                found.append(Discrepancy("INVOICE_QTY_OVER_ORDER", f"line {line.line_id}: invoiced {qty}, ordered {line.qty}"))
+            if asn is not None and qty > shipped.get(line.line_id, 0):
+                found.append(Discrepancy("INVOICE_QTY_OVER_SHIPPED", f"line {line.line_id}: invoiced {qty}, shipped {shipped.get(line.line_id, 0)}"))
     return found

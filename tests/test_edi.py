@@ -378,3 +378,58 @@ def test_a_damaged_document_is_read_or_refused_never_a_crash(seed, kind):
         parse(damaged)
     except X12Error as exc:
         assert exc.code.startswith("E_")
+
+
+# ---- what the writer writes, the 856 hierarchy and the segment terminator --------------------------------
+
+
+def test_the_writer_transliterates_a_ship_to_name_by_a_stated_rule_and_refuses_what_it_cannot():
+    po = PurchaseOrder("PO-1", PO.date, LINES, "SA", "Müller Autoteile")
+    assert parse(build_850(po, SENDER, RECEIVER)).documents[0].ship_to == "Muller Autoteile"  # accents dropped, nothing else changed
+    with pytest.raises(X12Error) as err:
+        build_850(PurchaseOrder("PO-1", PO.date, LINES, "SA", "東京 Autoteile"), SENDER, RECEIVER)
+    assert err.value.code == "E_ELEMENT_TYPE"  # no letter to fall back to: refused at write time, not written
+
+
+def test_the_writer_refuses_a_document_its_own_reader_would_refuse():
+    too_long = "P" * 23
+    for build, doc in (
+        (build_850, PurchaseOrder(too_long, PO.date, LINES)),
+        (build_855, PoAck(too_long, PO.date, ACK.lines)),
+        (build_856, Asn("S" * 31, ASN.date, ASN.orders)),
+        (build_810, Invoice(too_long, INV.date, "PO-10001", INV.lines, INV.total_cents)),
+        (build_850, PurchaseOrder("PO-1", PO.date, (Line("1", 1, "EA", 100, "VP", "X" * 49),))),
+        (build_850, PurchaseOrder("PO-1", PO.date, (Line("1", 0, "EA", 100, "VP", "ABC"),))),
+    ):
+        with pytest.raises(X12Error) as err:
+            build(doc, SENDER, RECEIVER)
+        assert err.value.code.startswith("E_")
+    assert parse(build_850(PurchaseOrder("P" * 22, PO.date, LINES), SENDER, RECEIVER)).documents[0].po_number == "P" * 22  # at the limit it is fine
+
+
+def test_856_an_order_level_with_no_prf_is_a_coded_error_never_a_crash():
+    for body in (
+        [BSN, H1, H2, H3, LIN, SN1, "CTT*3"],  # the only order has no PRF
+        [BSN, H1, H2, "CTT*2"],  # an order with no PRF and no items
+        [BSN, H1, "HL*2*1*O", "PRF*PO-A", "HL*3*1*O", "HL*4*3*I", LIN, SN1, "CTT*4"],  # the second has none: its item is not PO-A's
+    ):
+        refused(wrap("856", body), "E_MISSING_SEGMENT")
+
+
+def test_856_each_item_goes_to_the_order_its_hl_parent_names():
+    body = [BSN, H1, "HL*2*1*O", "PRF*PO-A", "HL*3*1*O", "PRF*PO-B", "HL*4*2*I", "LIN**VP*PARTA", "SN1**7*EA",
+            "HL*5*3*I", "LIN**VP*PARTB", "SN1**2*EA", "CTT*5"]
+    asn = parse(wrap("856", body)).documents[0]
+    assert [(o.po_number, [(i.part_number, i.qty) for i in o.items]) for o in asn.orders] == [("PO-A", [("PARTA", 7)]), ("PO-B", [("PARTB", 2)])]
+
+
+def test_856_a_second_prf_under_one_order_is_refused():
+    refused(wrap("856", [BSN, H1, H2, PRF, "PRF*PO-OTHER", H3, LIN, SN1, "CTT*3"]), "E_SEGMENT_ORDER")
+
+
+def test_a_newline_terminator_is_accepted_only_when_the_isa_header_defines_it():
+    text = doc850()
+    assert parse(text.replace("~\n", "\n")).documents == [PO]  # ISA106 is the newline, so it is the terminator
+    head, rest = text.split("~\n", 1)
+    refused(head + "~\n" + rest.replace("~\n", "\n"), "E_UNTERMINATED")  # ISA says ~ and the segments end with a bare newline
+    refused(text.replace("~\n", " "), "E_ISA_SEPARATORS")  # a space is never a terminator

@@ -1,9 +1,10 @@
 import datetime as dt
+import re
 
 from django.core.management.base import BaseCommand, CommandError
 
 from catalog.edi.orders import OrderError, purchase_order_for
-from catalog.edi.x12 import build_850, parse
+from catalog.edi.x12 import X12Error, build_850
 
 
 class Command(BaseCommand):
@@ -26,10 +27,12 @@ class Command(BaseCommand):
                 raise CommandError(f"{raw!r} is not PART_ID:QTY")
         try:
             po = purchase_order_for(opts["supplier"], items, opts["po"], dt.date.today(), opts["ship_to"])
-            text = build_850(po, sender="CAMLOBE LAB", receiver=opts["supplier"].upper()[:15], when=dt.datetime.now())
-        except (OrderError, ValueError) as exc:
+            # a supplier code is a slug (hyphens, underscores), an interchange id is letters, digits and spaces
+            receiver = re.sub(r"[^A-Z0-9]", "", opts["supplier"].upper())[:15] or "SUPPLIER"
+            # build_850 reads the document back before returning it, so what is printed reads clean or this is an X12Error
+            text = build_850(po, sender="CAMLOBE LAB", receiver=receiver, when=dt.datetime.now())
+        except (OrderError, X12Error, ValueError) as exc:
             raise CommandError(str(exc))
-        parse(text)  # what we send must read back clean
         if opts["out"]:
             with open(opts["out"], "w", encoding="ascii", newline="\n") as handle:
                 handle.write(text)

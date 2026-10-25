@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
@@ -220,7 +221,8 @@ def split_segments(text: str) -> tuple[list[Segment], str, str]:
     if len(text) < ISA_LENGTH:
         raise X12Error("E_ISA_SHORT", f"the ISA segment is {len(text)} characters, it must be {ISA_LENGTH}")
     es, ss, term = text[3], text[104], text[105]
-    if es.isalnum() or ss.isalnum() or term.isalnum() or len({es, ss, term}) != 3 or es in " \r\n" or term in " \r\n":
+    # a line break is a legal segment terminator when ISA106 itself is that character; a space never is
+    if es.isalnum() or ss.isalnum() or term.isalnum() or len({es, ss, term}) != 3 or es in " \r\n" or term == " ":
         raise X12Error("E_ISA_SEPARATORS", f"unusable separators {es!r} {ss!r} {term!r}", 1)
     pieces = text.split(term)
     if pieces[-1].strip("\r\n \t") != "":
@@ -444,6 +446,8 @@ def _parse_856(body: list[Segment], st: Segment) -> Asn:
     hl_total = 0
     levels: dict[str, str] = {}  # hl id -> level code
     orders: list[tuple[str, list[AsnItem]]] = []
+    order_slot: dict[str, int] = {}  # order level HL id -> its place in `orders`, set by the PRF that follows it
+    item_order = -1  # the order the current item level HL belongs to, by its HL02 parent and nothing else
     pending_part: tuple[str, str] | None = None
     for seg in body[1:]:
         if seg.tag == "HL":
@@ -466,10 +470,16 @@ def _parse_856(body: list[Segment], st: Segment) -> Asn:
                     raise X12Error("E_HL_LEVEL", f"a {level} level cannot sit under a {levels[parent]} level", seg.number)
             levels[hid] = level
             if level == "I":
+                if parent not in order_slot:
+                    raise X12Error("E_MISSING_SEGMENT", f"HL{hid} is an item of order level HL{parent}, which has no PRF", seg.number)
+                item_order = order_slot[parent]
                 pending_part = ("", "")
         elif seg.tag == "PRF":
             if not levels or list(levels.values())[-1] != "O":
                 raise X12Error("E_SEGMENT_ORDER", "PRF belongs directly under an order level HL", seg.number)
+            if list(levels)[-1] in order_slot:
+                raise X12Error("E_SEGMENT_ORDER", "an order level HL takes one PRF", seg.number)
+            order_slot[list(levels)[-1]] = len(orders)
             orders.append((an(seg, 1, "purchase order number", 1, 22), []))
         elif seg.tag == "LIN":
             if pending_part is None or pending_part != ("", ""):
@@ -480,7 +490,7 @@ def _parse_856(body: list[Segment], st: Segment) -> Asn:
                 raise X12Error("E_SEGMENT_ORDER", "SN1 must follow the LIN of an item", seg.number)
             qty = whole(seg, 2, "quantity shipped")
             uom = code(seg, 3, "unit of measure", UOM_CODES)
-            orders[-1][1].append(AsnItem(pending_part[0], pending_part[1], qty, uom))
+            orders[item_order][1].append(AsnItem(pending_part[0], pending_part[1], qty, uom))
             pending_part = None
         elif seg.tag in ("TD1", "REF", "DTM"):
             pass  # accepted and ignored: packaging, references and dates are outside the subset
@@ -490,6 +500,8 @@ def _parse_856(body: list[Segment], st: Segment) -> Asn:
             raise X12Error("E_UNEXPECTED_SEGMENT", f"{seg.tag} is not part of the supported 856 subset", seg.number)
     if pending_part is not None:
         raise X12Error("E_MISSING_SEGMENT", "the last item HL has no LIN and SN1", body[-1].number)
+    if any(level == "O" and hid not in order_slot for hid, level in levels.items()):
+        raise X12Error("E_MISSING_SEGMENT", "an order level HL has no PRF", body[-1].number)
     if not orders or any(not items for _, items in orders):
         raise X12Error("E_MISSING_SEGMENT", "every order level needs at least one item", st.number)
     _ctt(body, hl_total, "HL segments", st)
@@ -565,6 +577,22 @@ def _wrap(set_id: str, body: list[str], sender: str, receiver: str, control: int
     return "\n".join(s + TERM for s in segments) + "\n"
 
 
+def _checked(text: str) -> str:
+    """A writer never hands out a document its own reader would refuse: it reads it back and raises the reader's coded error."""
+    parse(text)
+    return text
+
+
+def ascii_name(value: str) -> str:
+    """A free text name in the basic character set: NFKD, then the accents dropped (Müller becomes Muller).
+
+    Anything still outside printable ASCII afterwards (a letter with no accent to drop) is left in place, and the
+    read back in `_checked` refuses it with E_ELEMENT_TYPE: nothing is guessed at.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
 def _clean(value: str) -> str:
     if any(c in value for c in (ES, SS, TERM, "\n", "\r")):
         raise ValueError(f"{value!r} contains an X12 separator")
@@ -574,11 +602,11 @@ def _clean(value: str) -> str:
 def build_850(po: PurchaseOrder, sender: str, receiver: str, control: int = 1, when: dt.datetime | None = None, usage: str = "T") -> str:
     body = [f"BEG{ES}00{ES}{po.po_type}{ES}{_clean(po.po_number)}{ES}{ES}{fmt_date(po.date)}"]
     if po.ship_to:
-        body.append(f"N1{ES}ST{ES}{_clean(po.ship_to)}")
+        body.append(f"N1{ES}ST{ES}{_clean(ascii_name(po.ship_to))}")
     for ln in po.lines:
         body.append(_po1(ln))
     body.append(f"CTT{ES}{len(po.lines)}")
-    return _wrap("850", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage)
+    return _checked(_wrap("850", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage))
 
 
 def _po1(ln: Line, tag: str = "PO1") -> str:
@@ -595,7 +623,7 @@ def build_855(ack: PoAck, sender: str, receiver: str, control: int = 1, when: dt
         qty = "" if a.qty is None else str(a.qty)
         body.append(f"ACK{ES}{a.status}{ES}{qty}{ES}{a.uom}")
     body.append(f"CTT{ES}{len(seen)}")
-    return _wrap("855", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage)
+    return _checked(_wrap("855", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage))
 
 
 def build_856(asn: Asn, sender: str, receiver: str, control: int = 1, when: dt.datetime | None = None, usage: str = "T") -> str:
@@ -613,7 +641,7 @@ def build_856(asn: Asn, sender: str, receiver: str, control: int = 1, when: dt.d
                 f"SN1{ES}{ES}{item.qty}{ES}{item.uom}",
             ]
     body.append(f"CTT{ES}{hl}")
-    return _wrap("856", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage)
+    return _checked(_wrap("856", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage))
 
 
 def build_810(inv: Invoice, sender: str, receiver: str, control: int = 1, when: dt.datetime | None = None, usage: str = "T") -> str:
@@ -621,4 +649,4 @@ def build_810(inv: Invoice, sender: str, receiver: str, control: int = 1, when: 
     for ln in inv.lines:
         body.append(_po1(ln, "IT1"))
     body += [f"TDS{ES}{inv.total_cents}", f"CTT{ES}{len(inv.lines)}"]
-    return _wrap("810", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage)
+    return _checked(_wrap("810", body, sender, receiver, control, when or dt.datetime(2026, 10, 25, 9, 0), usage))
