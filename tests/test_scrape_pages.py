@@ -962,3 +962,88 @@ def test_an_expired_session_page_with_a_password_field_and_no_table_is_logged_in
     out = records(adapter)
     assert codes(out) == [] and [r.fields["Part No"] for r in rows(out)] == [part(1)[0], part(2)[0]]
     assert adapter.notes()["logins"] == 2 and adapter.notes()["relogins"] == 1
+
+
+# ---- F12: robots.txt answering a redirect (RFC 9309 2.3.1.2: follow up to five, apply the rules to the initial site) --------------
+
+
+DISALLOW = "User-agent: *\nDisallow: /catalog\n"
+
+
+def robots_route(robots, other_hosts=()):
+    """`robots(path)` answers requests for /robots.txt and the files it redirects to; every other URL is the catalog."""
+    seen = []
+
+    def route(url):
+        seen.append(url)
+        parts = url.split("/", 3)
+        host, path = parts[2], "/" + (parts[3] if len(parts) > 3 else "")
+        if path.startswith("/catalog"):
+            return 200, {}, products_table([part(1), part(2)])
+        return robots(host, path)
+
+    return route, seen
+
+
+def run_with_robots(robots):
+    route, seen = robots_route(robots)
+    adapter = adapter_for(route, respect_robots=True)
+    out = records(adapter)
+    return out, seen, adapter.notes()
+
+
+def chain(n, final, host="shop.test"):
+    """robots.txt -> /r1 -> ... -> /r<n> redirects, then `final` at /r<n> ... (n hops in all)."""
+
+    def robots(h, path):
+        step = 0 if path == "/robots.txt" else int(path[2:])
+        if step < n:
+            return 301, {"Location": f"/r{step + 1}"}, ""
+        return final
+
+    return robots
+
+
+@pytest.mark.parametrize("hops", [1, 2, 5])
+def test_a_robots_txt_redirect_is_followed_up_to_five_times_and_its_rules_apply_to_the_site(hops):
+    out, seen, notes = run_with_robots(chain(hops, (200, {}, DISALLOW)))
+    assert codes(out) == ["E_ROBOTS"] and rows(out) == [] and notes["robots"] == "read"
+    assert not any("/catalog" in u for u in seen) and len(seen) == hops + 1
+
+
+def test_a_robots_txt_that_redirects_to_a_file_that_allows_everything_lets_the_walk_through():
+    out, seen, notes = run_with_robots(chain(1, (200, {}, "User-agent: *\nDisallow: /private\n")))
+    assert codes(out) == [] and len(rows(out)) == 2 and notes["robots"] == "read"
+
+
+def test_more_than_five_redirects_for_robots_txt_count_as_unavailable_and_the_walk_goes_on():
+    out, seen, notes = run_with_robots(chain(6, (200, {}, DISALLOW)))
+    assert codes(out) == [] and len(rows(out)) == 2 and notes["robots"].startswith("none")
+    assert len([u for u in seen if "/r" in u or "robots" in u]) == 6  # the first file and five redirects, no more
+
+
+def test_a_robots_txt_that_redirects_to_itself_is_unavailable_not_a_loop_without_end():
+    out, seen, notes = run_with_robots(lambda host, path: (302, {"Location": "/robots.txt"}, ""))
+    assert codes(out) == [] and notes["robots"].startswith("none") and len(seen) <= 8
+
+
+def test_a_robots_txt_redirect_may_leave_the_host_and_the_rules_found_there_apply_to_the_initial_site():
+    def robots(host, path):
+        if host == "shop.test":
+            return 301, {"Location": "https://static.example/robots.txt"}, ""
+        return 200, {}, DISALLOW
+
+    out, seen, _ = run_with_robots(robots)
+    assert codes(out) == ["E_ROBOTS"] and seen == [f"{BASE}/robots.txt", "https://static.example/robots.txt"]
+
+
+def test_the_status_a_redirected_robots_txt_ends_on_is_read_as_for_any_robots_txt():
+    allowed = run_with_robots(chain(1, (404, {}, "not here")))
+    assert codes(allowed[0]) == [] and allowed[2]["robots"] == "none (HTTP 404)"  # a 4xx: unavailable, anything may be fetched
+    server_error = run_with_robots(chain(1, (500, {}, "oops")))
+    assert codes(server_error[0]) == ["E_ROBOTS_UNAVAILABLE"] and rows(server_error[0]) == []  # a 5xx: everything is disallowed
+
+
+def test_a_robots_txt_redirect_with_no_location_is_unavailable():
+    out, _, notes = run_with_robots(lambda host, path: (301, {}, ""))
+    assert codes(out) == [] and len(rows(out)) == 2 and notes["robots"].startswith("none")

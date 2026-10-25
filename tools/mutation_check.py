@@ -486,6 +486,11 @@ MUTANTS: list[Mutant] = [
     # F8: a page that has the product table is a data page, a password field or not
     D("scrape: a sign in box on a data page makes it a login wall", "scrape", "_read_page", "and <-> or", "self._has_password_field(soup)", PAGES),
     D("scrape: the answer to a login that shows the table and a sign in box is a refusal", "scrape", "_login", "and <-> or", "self._has_password_field(after)", PAGES),
+    # F12: a robots.txt redirect is followed up to five times and its rules apply to the initial site
+    D("scrape: a redirect on robots.txt is read as the file", "scrape", "_read_robots", "NotIn -> In", "if response.status_code not in REDIRECT_STATUSES", PAGES),
+    D("scrape: robots.txt is followed one redirect short", "scrape", "_read_robots", "Add -> Sub", "for _ in range(MAX_ROBOTS_REDIRECTS + 1)", PAGES),
+    D("scrape: robots.txt is followed one redirect too far", "scrape", "_read_robots", "1 -> 2", "for _ in range(MAX_ROBOTS_REDIRECTS + 1)", PAGES),
+    D("scrape: a robots.txt redirect to https is not followed", "scrape", "_read_robots", "string 'http' -> ''", 'not in ("http", "https")', PAGES),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]

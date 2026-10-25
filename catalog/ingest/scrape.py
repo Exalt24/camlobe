@@ -76,6 +76,7 @@ DEFAULT_CHALLENGE_MARKERS = (
 PARSER = "lxml"  # closes an unclosed <td> or <tr> the way a browser does; the stdlib parser nests them instead
 REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 MAX_REDIRECT_HOPS = 3
+MAX_ROBOTS_REDIRECTS = 5  # RFC 9309 2.3.1.2
 MAX_COLSPAN = 1000  # the HTML standard's own limit for a colspan
 
 
@@ -672,19 +673,30 @@ class ScrapeAdapter:
 
     def _read_robots(self) -> None:
         scheme, host = _origin(self.cfg.start_url)
+        url, unavailable = f"{scheme}://{host}/robots.txt", ""
         try:
-            response = self._request("GET", f"{scheme}://{host}/robots.txt")
+            for _ in range(MAX_ROBOTS_REDIRECTS + 1):  # RFC 9309 2.3.1.2: up to five consecutive redirects, even to another host
+                response = self._request("GET", url)
+                if response.status_code not in REDIRECT_STATUSES:
+                    break
+                target = urljoin(url, response.headers.get("Location", "")) if response.headers.get("Location") else ""
+                if urlsplit(target).scheme not in ("http", "https"):
+                    unavailable = f"HTTP {response.status_code}, no place to go"
+                    break
+                url = target
+            else:  # the sixth redirect in a row: the file is unavailable
+                unavailable = f"more than {MAX_ROBOTS_REDIRECTS} redirects"
         except _Stop as stop:
             if stop.code == "E_SERVER_ERROR":  # RFC 9309: a robots.txt the server fails on is read as everything disallowed
                 raise _Stop("E_ROBOTS_UNAVAILABLE", "robots.txt answered with a server error, so nothing is read") from stop
             raise
         parser = robotparser.RobotFileParser()
-        if response.status_code == 200:
-            parser.parse(response.text.splitlines())
+        if not unavailable and response.status_code == 200:
+            parser.parse(response.text.splitlines())  # the rules of the file the redirects ended on apply to the initial site
             self._stats["robots"] = "read"
-        else:  # a missing robots.txt (or any other 4xx) means no rules, as RFC 9309 says
+        else:  # a missing robots.txt (or any other 4xx, or a redirect that never ends) means no rules, as RFC 9309 says
             parser.parse([])
-            self._stats["robots"] = f"none (HTTP {response.status_code})"
+            self._stats["robots"] = f"none ({unavailable or f'HTTP {response.status_code}'})"
         self._robots = parser
         delay = parser.crawl_delay(self.cfg.user_agent)
         if delay:
