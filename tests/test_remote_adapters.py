@@ -359,3 +359,36 @@ def test_a_server_that_caps_its_page_size_and_sends_no_total_is_still_read_whole
     run = ingest(get_supplier(), adapter)
     assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 250
     assert RawPart.objects.count() == 250 and FeedCheckpoint.objects.get().position == 250
+
+
+# ---- the charset of a JSON answer is the JSON's, not the Content-Type's -------------------------------------------
+
+
+class _StubSession:
+    """A session answering every GET with the same JSON bytes under a chosen Content-Type, as a real adapter would label them."""
+
+    def __init__(self, content_type, items):
+        import json
+
+        self.content_type = content_type
+        self.body = json.dumps({"items": items, "total": len(items)}, ensure_ascii=False).encode("utf-8")
+
+    def get(self, url, **kwargs):
+        import requests
+
+        response = requests.Response()
+        response.status_code = 200
+        response._content = self.body
+        if self.content_type:
+            response.headers["Content-Type"] = self.content_type
+        response.encoding = requests.utils.get_encoding_from_headers(response.headers)  # ISO-8859-1 for text/* without a charset
+        return response
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "application/json; charset=utf-8", "text/plain", "text/json", "text/html", ""])
+def test_rest_a_json_answer_is_utf8_whatever_its_content_type_says(content_type):
+    """requests reads text/* with no charset as ISO-8859-1, which turned every accented brand into mojibake on a success."""
+    items = [{"sku": "MF-1", "manufacturer": "Würth", "title": "Bremsscheibe für Ø 280 mm", "price": "12.50", "gtin": ""}]
+    run = ingest(get_supplier("j"), RestAdapter("http://api.test/catalog", session=_StubSession(content_type, items)))
+    stored = RawPart.objects.get()
+    assert run.status == PipelineRun.Status.SUCCEEDED and (stored.brand_raw, stored.description_raw) == ("Würth", "Bremsscheibe für Ø 280 mm")

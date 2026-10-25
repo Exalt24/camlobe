@@ -1,6 +1,8 @@
 """A paginated JSON REST source: GET <url>?offset=N&limit=M answering {"items": [...], "total": N}."""
 from __future__ import annotations
 
+import json
+
 import requests
 
 from .paged import FatalError, PagedAdapter, PermanentError, TransientError
@@ -12,6 +14,12 @@ def _retry_after(response: requests.Response) -> float | None:
         return max(0.0, float(value)) if value is not None else None
     except ValueError:  # an HTTP date: not worth parsing, fall back to the backoff
         return None
+
+
+def _json_body(response: requests.Response):
+    """JSON is UTF-8 (RFC 8259): read the bytes, not requests' guess from the Content-Type, which is ISO-8859-1 for any
+    text/* type with no charset and turned every accented brand into mojibake."""
+    return json.loads(response.content)
 
 
 class RestAdapter(PagedAdapter):
@@ -46,7 +54,7 @@ class RestAdapter(PagedAdapter):
         if status >= 400:
             raise PermanentError(f"HTTP {status}")
         try:
-            body = response.json()
+            body = _json_body(response)
             items = body["items"]
             total = body.get("total")
         except (ValueError, KeyError, TypeError) as exc:

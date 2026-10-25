@@ -454,6 +454,8 @@ MUTANTS: list[Mutant] = [
     D("scrape: an empty, # or javascript: next link is followed", "scrape", "_next_url", "negate the condition", "if not href", PAGES),
     D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if target ==', PAGES),
     D("scrape: a next link marked disabled is followed", "scrape", "_says_disabled", "and <-> or", 'any("disabled"', PAGES),
+    # ---- the same class in the REST adapter: a JSON answer is read as bytes ------------------------------------------------------------------
+    D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
 ]
 
 
