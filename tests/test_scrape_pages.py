@@ -863,3 +863,33 @@ def test_any_mix_of_table_structure_reads_as_the_grid_it_describes(cols, nrows, 
     head = f"<thead>{labels}{filters if filter_row else ''}</thead>{rows_html}" if thead else labels + rows_html
     got = read_table(head)
     assert [fields for _, fields in got] == want and all(reject == "" for reject, _ in got)
+
+
+# ---- F11: rel is a set of case insensitive tokens ------------------------------------------------------------------------------
+
+
+def rel_site(rel):
+    def route(url):
+        page = int(url.rsplit("page=", 1)[1])
+        nxt = f'<a rel="{rel}" href="/catalog?page={page + 1}">Next</a>' if page < 2 else ""
+        return 200, {}, products_table([part(page)], nxt=nxt)
+
+    return route
+
+
+@pytest.mark.parametrize(
+    "rel, follows",
+    [
+        ("next", True), ("NEXT", True), ("Next", True), ("nofollow next", True), ("next nofollow", True), ("noopener  next noreferrer", True),
+        ("nofollow\tNext", True), (" next ", True), ("nofollow\nnext", True),
+        ("nextpage", False), ("unnext", False), ("next-page", False), ("prev", False), ("nofollow", False), ("", False), ("prev nofollow", False),
+    ],
+)
+def test_a_rel_value_matches_the_next_link_by_its_tokens_and_ignoring_case(rel, follows):
+    out = records(adapter_for(rel_site(rel)))
+    assert codes(out) == [] and len(rows(out)) == (2 if follows else 1)
+
+
+def test_the_default_next_selector_still_matches_a_plain_rel_next_and_a_configured_one_is_used_as_written():
+    assert len(rows(records(adapter_for(rel_site("next"))))) == 2
+    assert len(rows(records(adapter_for(rel_site("nofollow next"), next_selector="a[rel=next]")))) == 1  # exactly what the config says

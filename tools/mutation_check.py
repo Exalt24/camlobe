@@ -483,6 +483,8 @@ MUTANTS: list[Mutant] = [
     D("scrape: a body cell with colspan fills no more cells", "scrape", "_table", "Sub -> Add", "cells.extend", PAGES),
     D("scrape: a second row of the thead is data", "scrape", "_table", "NotEq -> Eq", 'tr.parent.name != "thead"', PAGES),
     D("scrape: the header is the first row of the table, not of the thead", "scrape", "_table", "Eq -> NotEq", 'tr.parent.name == "thead"', PAGES),
+    # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
+    D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]
 
 

@@ -79,6 +79,12 @@ MAX_REDIRECT_HOPS = 3
 MAX_COLSPAN = 1000  # the HTML standard's own limit for a colspan
 
 
+def default_next_selector() -> str:
+    """rel is a set of ASCII case insensitive tokens (HTML standard 4.6.7), so the next link is the one whose rel HAS the token
+    `next`: `rel="nofollow next"` and `rel="NEXT"` are next links, `rel="nextpage"` is not."""
+    return "a[rel~=next i]"
+
+
 PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
 _PROXY_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
 _PROXY_HOST = re.compile(r"(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._~%-]+)(?::(?P<port>[^:]*))?")
@@ -119,7 +125,7 @@ class ScrapeConfig:
     session_cookie: str = ""  # when set, a login only counts if this cookie is in the jar afterwards
     cookie_jar: str = ""  # a file the session is saved to and loaded from; it holds a live session, treat it as a secret
     table_selector: str = "table.products"
-    next_selector: str = "a[rel=next]"
+    next_selector: str = field(default_factory=lambda: default_next_selector())  # a rel TOKEN, case insensitive: "nofollow next", "NEXT"
     delay_seconds: float = 1.0
     max_retries: int = 3
     backoff_base: float = 1.0
