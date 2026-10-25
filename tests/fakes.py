@@ -296,3 +296,278 @@ class SftpServer:
             pass
         for t in self.transports:
             t.close()
+
+
+# ------------------------------------------------------------------------------------------------
+# A supplier site that needs a login: CSRF token, session cookie, expiry, rate limit, a challenge page.
+# ------------------------------------------------------------------------------------------------
+
+import http.client  # noqa: E402
+import secrets  # noqa: E402
+from html import escape as html_escape  # noqa: E402
+
+CHALLENGE_PAGE = (
+    "<html><head><title>Just a moment...</title></head><body><h1>Checking your browser before accessing the site.</h1>"
+    '<div class="cf-chl-widget"></div></body></html>'
+)
+
+
+class ScrapeSite:
+    """A small shop site on 127.0.0.1 that records every request it gets (never a password).
+
+    products: list of dicts with the table's columns. Knobs a test can set at any time:
+      expire_after      a session dies after this many catalog requests (None: never)
+      throttle          {"after": n, "times": k, "retry_after": s}: after n catalog requests, the next k answer 429
+      throttle_forever  every catalog request after the first gets a 429 with this Retry-After (None: off)
+      challenge_page    catalog page number that answers 200 with a bot challenge instead of the table
+      block_page        catalog page number that answers 403
+      robots            the robots.txt text, or an int to answer that HTTP status
+      no_login          the catalog is public
+      login_form_challenge  the login page itself is a bot challenge
+      csrf_field        name of the hidden CSRF input ("" for none)
+      loop_back, offsite_next, fail_times   a next link that loops, a next link off the site, n answers of 503
+      expire_as, broken_session, offsite_redirect, redirect_on_bad_login, login_post_challenge   see the lines in __init__
+    """
+
+    COLUMNS = ["Part No", "Brand", "Description", "Price"]
+
+    def __init__(self, products, per_page=3, user="buyer", password="s3cret pass 42", **knobs):
+        self.products, self.per_page, self.user, self.password = products, per_page, user, password
+        self.expire_after = knobs.pop("expire_after", None)
+        self.throttle = knobs.pop("throttle", None)
+        self.throttle_forever = knobs.pop("throttle_forever", None)
+        self.challenge_page = knobs.pop("challenge_page", None)
+        self.block_page = knobs.pop("block_page", None)
+        self.robots = knobs.pop("robots", "User-agent: *\nDisallow: /private/\n")
+        self.no_login = knobs.pop("no_login", False)
+        self.login_form_challenge = knobs.pop("login_form_challenge", False)
+        self.csrf_field = knobs.pop("csrf_field", "csrf_token")
+        self.loop_back = knobs.pop("loop_back", False)  # the last page's next link leads back to page 1
+        self.offsite_next = knobs.pop("offsite_next", False)  # page 2's next link leaves the site
+        self.fail_times = knobs.pop("fail_times", 0)  # the next n catalog requests answer 503
+        self.expire_as = knobs.pop("expire_as", "redirect")  # a dead session gets a 302 to /login, the login form itself, or a 401
+        self.broken_session = knobs.pop("broken_session", False)  # the login works and no session is ever accepted afterwards
+        self.offsite_redirect = knobs.pop("offsite_redirect", None)  # this catalog page redirects to another site
+        self.redirect_on_bad_login = knobs.pop("redirect_on_bad_login", False)  # a wrong password answers 302 to /login, not 200
+        self.login_post_challenge = knobs.pop("login_post_challenge", False)  # posting the login answers with a bot challenge
+        assert not knobs, knobs
+        self.sessions: dict[str, int] = {}  # sid -> catalog requests still allowed (-1: unlimited)
+        self.csrf_tokens: set[str] = set()
+        self.log: list[dict] = []
+        self.catalog_requests = 0
+        self.logins = 0
+        self.lock = threading.Lock()
+        site = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                site.handle(self, "GET")
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode()
+                site.handle(self, "POST", {k: v[0] for k, v in parse_qs(body, keep_blank_values=True).items()})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=0.02), daemon=True)
+        self.thread.start()
+
+    # -- what a test reads -----------------------------------------------------------------------
+
+    def paths(self, method=None):
+        return [e["path"] + (f"?{e['query']}" if e["query"] else "") for e in self.log if method in (None, e["method"])]
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    @property
+    def pages(self):
+        return max(1, -(-len(self.products) // self.per_page))
+
+    # -- the site --------------------------------------------------------------------------------
+
+    def reply(self, h, status, body="", headers=None):
+        data = body.encode() if isinstance(body, str) else body
+        h.send_response(status)
+        for k, v in (headers or {}).items():
+            h.send_header(k, v)
+        h.send_header("Content-Type", "text/html; charset=utf-8")
+        h.send_header("Content-Length", str(len(data)))
+        h.end_headers()
+        h.wfile.write(data)
+
+    def handle(self, h, method, form=None):
+        parts = urlparse(h.path)
+        cookie = h.headers.get("Cookie") or ""
+        sid = next((c.split("=", 1)[1] for c in (x.strip() for x in cookie.split(";")) if c.startswith("sid=")), "")
+        with self.lock:
+            self.log.append(
+                {"method": method, "path": parts.path, "query": parts.query, "ua": h.headers.get("User-Agent"),
+                 "via": h.headers.get("Via"), "sid": sid, "form_keys": sorted(form or {})}
+            )
+            if parts.path == "/robots.txt":
+                if isinstance(self.robots, int):
+                    return self.reply(h, self.robots)
+                return self.reply(h, 200, self.robots)
+            if parts.path == "/login":
+                return self.login(h, method, form or {})
+            if parts.path == "/catalog" or parts.path.startswith("/private/"):
+                return self.catalog(h, parts, sid)
+        self.reply(h, 404, "not found")
+
+    def login(self, h, method, form):
+        if self.login_form_challenge:
+            return self.reply(h, 200, CHALLENGE_PAGE)
+        if method == "GET":
+            token = secrets.token_hex(8)
+            self.csrf_tokens.add(token)
+            hidden = f'<input type="hidden" name="{self.csrf_field}" value="{token}">' if self.csrf_field else ""
+            page = (
+                f'<html><body><form method="post" action="/login">{hidden}<input name="username">'
+                '<input type="password" name="password"><button>Sign in</button></form></body></html>'
+            )
+            return self.reply(h, 200, page)
+        if self.login_post_challenge:
+            return self.reply(h, 200, CHALLENGE_PAGE)
+        if self.csrf_field and form.get(self.csrf_field, "") not in self.csrf_tokens:
+            return self.reply(h, 403, "csrf token missing or used")
+        self.csrf_tokens.discard(form.get(self.csrf_field, ""))
+        if (form.get("username") != self.user or form.get("password") != self.password) and self.redirect_on_bad_login:
+            return self.reply(h, 302, "", {"Location": "/login"})
+        if form.get("username") != self.user or form.get("password") != self.password:
+            return self.reply(h, 200, '<html><body><p>Wrong login</p><form><input type="password" name="password"></form></body></html>')
+        sid = secrets.token_hex(12)
+        self.sessions[sid] = 0 if self.broken_session else (-1 if self.expire_after is None else self.expire_after)
+        self.logins += 1
+        self.reply(h, 302, "", {"Location": "/catalog?page=1", "Set-Cookie": f"sid={sid}; Path=/; HttpOnly"})
+
+    def catalog(self, h, parts, sid):
+        if parts.path.startswith("/private/"):
+            return self.reply(h, 200, "<html><body>private</body></html>")
+        if not self.no_login:
+            left = self.sessions.get(sid)
+            if left is None or left == 0:
+                self.sessions.pop(sid, None)
+                if self.expire_as == "form":
+                    return self.reply(h, 200, '<html><body><form method="post" action="/login"><input type="password" name="password"></form></body></html>')
+                if self.expire_as == "401":
+                    return self.reply(h, 401, "login required")
+                return self.reply(h, 302, "", {"Location": "/login"})
+            if left > 0:
+                self.sessions[sid] = left - 1
+        self.catalog_requests += 1
+        page = int((parse_qs(parts.query).get("page") or ["1"])[0])
+        if self.throttle_forever is not None and self.catalog_requests > 1:
+            return self.reply(h, 429, "slow down", {"Retry-After": str(self.throttle_forever)})
+        if self.throttle and self.catalog_requests > self.throttle["after"] and self.throttle["times"] > 0:
+            self.throttle["times"] -= 1
+            return self.reply(h, 429, "slow down", {"Retry-After": str(self.throttle["retry_after"])})
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            return self.reply(h, 503, "try later")
+        if page == self.offsite_redirect:
+            return self.reply(h, 302, "", {"Location": "http://example.invalid/elsewhere"})
+        if page == self.block_page:
+            return self.reply(h, 403, "forbidden")
+        if page == self.challenge_page:
+            return self.reply(h, 200, CHALLENGE_PAGE)
+        chunk = self.products[(page - 1) * self.per_page : page * self.per_page]
+        rows = "".join("<tr>" + "".join(f"<td>{html_escape(str(p[c]))}</td>" for c in self.COLUMNS) + "</tr>" for p in chunk)
+        head = "".join(f"<th>{c}</th>" for c in self.COLUMNS)
+        nxt = f'<a rel="next" href="/catalog?page={page + 1}">Next</a>' if page < self.pages else ""
+        if page == self.pages and self.loop_back:
+            nxt = '<a rel="next" href="/catalog?page=1">Next</a>'
+        if page == 2 and self.offsite_next:
+            nxt = '<a rel="next" href="http://example.invalid/catalog?page=3">Next</a>'
+        self.reply(h, 200, f'<html><body><table class="products"><thead><tr>{head}</tr></thead><tbody>{rows}</tbody></table>{nxt}</body></html>')
+
+
+def shop_products(n, brand="Marlow"):
+    return [{"Part No": f"MF-H{i:04d}A", "Brand": brand, "Description": f"Oil filter {i}", "Price": f"{i % 90 + 1}.00"} for i in range(1, n + 1)]
+
+
+class ForwardProxy:
+    """A tiny HTTP proxy on 127.0.0.1 that records every request it carried and tags it with a Via header."""
+
+    def __init__(self):
+        self.passed: list[tuple[str, str]] = []
+        proxy = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def relay(self):
+                target = urlparse(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else None
+                proxy.passed.append((self.command, self.path))
+                headers = {k: v for k, v in self.headers.items() if k.lower() not in ("proxy-connection", "connection", "host")}
+                headers["Via"] = "1.1 camlobe-test-proxy"
+                conn = http.client.HTTPConnection(target.hostname, target.port, timeout=10)
+                path = target.path + (f"?{target.query}" if target.query else "")
+                conn.request(self.command, path, body=body, headers=headers)
+                response = conn.getresponse()
+                data = response.read()
+                self.send_response(response.status)
+                for k, v in response.getheaders():
+                    if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        self.send_header(k, v)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                conn.close()
+
+            do_GET = do_POST = relay
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=lambda: self.httpd.serve_forever(poll_interval=0.02), daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def dead_proxy_url() -> str:
+    """The address of a proxy that is not there: a port that was open a moment ago and refuses connections now."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return f"http://127.0.0.1:{port}"
+
+
+class DroppingProxy:
+    """A proxy address that accepts the connection and hangs up at once: a fast stand-in for a proxy that is down."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        self.accepted = 0
+        self._stop = False
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            conn.close()
+
+    def close(self):
+        self._stop = True
+        self.sock.close()

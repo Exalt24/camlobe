@@ -11,7 +11,8 @@ from catalog.runs import AlreadyRunning
 
 class Command(BaseCommand):
     help = (
-        "Ingest one feed for one supplier from a local file, an SFTP server, a paginated REST API or a SOAP service. "
+        "Ingest one feed for one supplier from a local file, an SFTP server, a paginated REST API, a SOAP service or a site "
+        "that needs a login (--scrape-config; only for a site whose owner allows it). "
         "Restartable: it resumes at its checkpoint, and running it again over the same source changes nothing. "
         "Secrets are read from environment variables, never from the command line."
     )
@@ -33,6 +34,7 @@ class Command(BaseCommand):
         src.add_argument("--rest-url", help="a paginated JSON API: GET url?offset=&limit= -> {items, total}")
         src.add_argument("--token-env", help="name of the environment variable holding a bearer token")
         src.add_argument("--soap-wsdl", help="WSDL URL of a SOAP service with a GetCatalogPage operation")
+        src.add_argument("--scrape-config", help="a JSON file describing a site to read: see docs/feeds.md (credentials are named env variables)")
         parser.add_argument("--page-size", type=int, default=100, help="for --rest-url and --soap-wsdl")
         parser.add_argument("--rate-limit", type=float, default=None, help="requests per second for --rest-url and --soap-wsdl")
         mode = parser.add_argument_group("full snapshot feeds (remembered for the supplier)")
@@ -41,9 +43,16 @@ class Command(BaseCommand):
         mode.add_argument("--allow-mass-delist", action="store_true", help="let a run delist more than half of a supplier's listings")
 
     def build_adapter(self, opts):
-        chosen = [k for k in ("file", "sftp_host", "rest_url", "soap_wsdl") if opts[k]]
+        chosen = [k for k in ("file", "sftp_host", "rest_url", "soap_wsdl", "scrape_config") if opts[k]]
         if len(chosen) != 1:
-            raise CommandError("give exactly one source: --file, --sftp-host, --rest-url or --soap-wsdl")
+            raise CommandError("give exactly one source: --file, --sftp-host, --rest-url, --soap-wsdl or --scrape-config")
+        if opts["scrape_config"]:
+            from catalog.ingest.scrape import ScrapeAdapter, ScrapeConfig, ScrapeConfigError
+
+            try:
+                return ScrapeAdapter(ScrapeConfig.from_file(opts["scrape_config"]))
+            except ScrapeConfigError as exc:
+                raise CommandError(str(exc))
         if opts["file"]:
             path = Path(opts["file"])
             if not path.is_file():

@@ -7,3 +7,4 @@ demo-data/
 *.egg-info/
 .env
 .secrets/
+*.cookies
