@@ -86,17 +86,17 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 686 tests, needs Postgres on 5434 and Meilisearch on 7701
-python tools/mutation_check.py             # 258 guards, edits source in place: run it in a copy (--help)
+python -m pytest tests/ -o addopts=""      # 954 tests, needs Postgres on 5434 and Meilisearch on 7701
+python tools/mutation_check.py             # 296 guards, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and CI starts both.
 
-- 686 tests, all passing in a run on 2026-10-26 after the scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)); 597 passed after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
+- 954 tests, all passing in a run on 2026-10-26 after the second scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)); 686 passed after the first ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)), 597 after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
 - Every rule has a test in both directions: the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures in every stage, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness: 148 guards. On 2026-10-25 all 144 then in the harness were killed, of which one was a hang that hit its time limit and 143 a failing test ([output](docs/test-runs/2026-10-25-mutation.txt)). The run was made in a copy of the repository in four parts. The harness reported ten survivors in its first passes. Each ended as a new test or assertion, the removal of a redundant guard, or a fix to the harness itself. On 2026-10-26, after the two fixes, the 4 new guards and 9 touched ones were run in a copy and all 13 were killed ([output](docs/test-runs/2026-10-26-mutation-partial.txt)). After the second review all 234 guards were run in a copy, in three parts, and 234 were killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)). Two survivors showed up on the way: a login test too weak to tell one guard from another, which was strengthened, and a guard on a branch that could never run, which was removed with the branch. The scraper output round added 24 guards (258 in all) whose edits are derived from the syntax tree by `mutate_ast.py`, not matched as text; after the fixes those 24 and the other 91 guards of the files that changed were run in a copy, and 115 of 115 were killed ([output](docs/test-runs/2026-10-26-mutation-output-round.txt)). The first run of one of them survived (the log record filter), because no test made a request whose URL held a secret, and a test was added.
+- Mutation harness: 296 guards. On 2026-10-25 all 144 then in the harness were killed ([output](docs/test-runs/2026-10-25-mutation.txt)), after ten survivors in the first passes that each ended as a new test, a removed redundant guard or a fix to the harness. After the second review all 234 were killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)), and after the first scraper output round 115 of 115 new or touched ones ([output](docs/test-runs/2026-10-26-mutation-output-round.txt)). Most guards since then have their edit derived from the syntax tree by `mutate_ast.py`, not matched as text. After the second output round all 295 guards then in the harness were run in a copy of the repository and killed in 1,822 s ([output](docs/test-runs/2026-10-26-mutation-second-round-295.txt)); the guard added after that run and the one it changed were killed in a second run. Two guards are weaker than the rest: the one for the rel token only empties the default selector, and the SOCKS one is a text pair on `requirements.txt`, which `mutate_ast.py` cannot edit.
 
 ## Register: what ran and what did not
 
@@ -115,6 +115,7 @@ The database tests use the compose Postgres and create their own `test_camlobe` 
 ## Limits
 
 - **HTTP scraping is built, and was only ever run against a local fake site.** It has never met a real site, a real proxy service, a real CAPTCHA or a web firewall, and a real site's login, markup and limits will differ. It checks robots.txt, spaces its requests, honours Retry-After and stops on a block or a challenge without trying to get past it, and a page the site cut short, an empty table or a body shorter than announced ends the run as partial and never as a success, but none of that is permission: use it only on a site whose owner has allowed it, with its terms read ([feeds](docs/feeds.md#scraping-a-site)).
+- **Known limits of the scraper, not fixed:** `rowspan` in a product table; a price cell with two bare whole amounts split by one space and no currency sign (`12 345` reads as one price, `$20 $15` is refused); and a SOCKS proxy was only tried against a refused connection, never a working one.
 - A delisting rests on one snapshot per supplier: a supplier that sends two full feeds at once (brakes in one file, filters in another) must not be flagged, and a feed that is truncated but reads cleanly is only caught when it would delist more than half the listings.
 - A page repeated whole by a paged source is detected, pages that overlap are not. A resumed REST or SOAP run starts at the page of its checkpoint, so it needs the API to keep its order between two runs (the scraper never resumes by position): [feeds](docs/feeds.md#paged-sources).
 - A secret in a URL parameter whose name does not say so (`?k=...`) stays in the stored source name, because hiding every query value would merge two sources into one checkpoint; it is taken out of every message ([feeds](docs/feeds.md#secrets)).
@@ -132,7 +133,7 @@ The database tests use the compose Postgres and create their own `test_camlobe` 
 
 ## Stack
 
-Python 3.13, Django 5.2, Django REST framework, PostgreSQL 17, Meilisearch, paramiko, zeep, requests, defusedxml, beautifulsoup4 with lxml, pytest and Hypothesis, Docker Compose, GitHub Actions.
+Python 3.13, Django 5.2, Django REST framework, PostgreSQL 17, Meilisearch, paramiko, zeep, requests with SOCKS support, defusedxml, beautifulsoup4 with lxml, pytest and Hypothesis, Docker Compose, GitHub Actions.
 
 ## License
 
