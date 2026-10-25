@@ -1112,3 +1112,35 @@ def test_a_sale_cell_with_a_struck_price_and_a_new_price_is_a_visible_rejected_r
     assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_rejected == 1
     assert list(RejectedRow.objects.values_list("reason", flat=True)) == ["bad_cost"] and "$20" in RejectedRow.objects.get().raw
     assert dict(RawPart.objects.values_list("part_number_raw", "cost_cents")) == {"MF-1": 1000, "MF-3": 123450}
+
+
+@pytest.mark.parametrize(
+    "base_tag, posted_to",
+    [("", "/login/post/"), ('<base href="/account/">', "/account/post/")],
+    ids=["served_address", "base_element"],
+)
+def test_the_action_of_the_login_form_is_resolved_like_any_other_link(base_tag, posted_to):
+    """The same class as the next link: the login page redirects to its trailing slash address, its form action is relative."""
+    login_page = (
+        f'<html><head>{base_tag}</head><body><form action="post/" method="post"><input type="hidden" name="csrf_token" value="t">'
+        '<input name="username"><input type="password" name="password"></form></body></html>'
+    )
+    state = {"in": False, "posts": []}
+
+    def route(method, url, data):
+        path = url.replace(BASE, "")
+        if method == "GET" and path == "/login":
+            return 301, {"Location": "/login/"}, ""
+        if method == "GET" and path == "/login/":
+            return 200, {}, login_page
+        if method == "POST":
+            state["posts"].append(path)
+            state["in"] = path == posted_to
+            return 200, {}, "<html><body>welcome</body></html>"
+        return (200, {}, products_table([part(1)])) if state["in"] else (200, {}, login_page)
+
+    clock = Clock()
+    cfg = ScrapeConfig(start_url=f"{BASE}/catalog?page=1", login_url=f"{BASE}/login", username_env="U", password_env="P", delay_seconds=0.0, respect_robots=False)
+    adapter = ScrapeAdapter(cfg, session=MethodSession(route), environ={"U": "buyer", "P": "pw"}, sleep=clock.sleep, clock=clock.time)
+    out = records(adapter)
+    assert codes(out) == [] and len(rows(out)) == 1 and state["posts"] == [posted_to]

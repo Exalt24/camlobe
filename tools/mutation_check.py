@@ -475,7 +475,8 @@ MUTANTS: list[Mutant] = [
     D("scrape: a redirect's landing address is not told from the one asked for", "scrape", "_walk", "negate the condition", "if served != url", PAGES),
     D("scrape: a page read under its second address is read again", "scrape", "_walk", "delete the call statement", "seen.add(served)", PAGES),
     D("scrape: a next link back to the page served is followed", "scrape", "_next_url", "In -> NotIn", 'return "" if target in itself', PAGES),
-    D("scrape: a base element is not the base of a link", "scrape", "_next_url", "negate the condition", "if base_tag is not None", PAGES),
+    D("scrape: a base element is not the base of a link", "scrape", "_document_base", "negate the condition", "if base_tag is not None", PAGES),
+    D("scrape: the action of the login form is not read", "scrape", "_login", "and <-> or", "action = urljoin", PAGES),
     # F5, F6, F7: the table's own rows and cells, a th in a body row, a spanned cell, a second header row
     D("scrape: the rows of a nested table are rows of the product table", "scrape", "_table", "Is -> IsNot", "own = [tr for tr", PAGES),
     D("scrape: the cells of a nested table are cells of the row", "scrape", "_cells", "False -> True", "recursive=False", PAGES),

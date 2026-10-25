@@ -431,11 +431,16 @@ class ScrapeAdapter:
         href = (link.get("href") or "").strip()
         if not href or href.startswith("#") or href.lower().startswith("javascript:") or self._says_disabled(link):
             return ""
-        base_tag = soup.select_one("base[href]")  # the FIRST base element with an href is the document base, the rest are ignored
-        base = urljoin(current, base_tag["href"].strip()) if base_tag is not None else current
-        target = urldefrag(urljoin(base, href))[0]
+        target = urldefrag(urljoin(self._document_base(soup, current), href))[0]
         itself = {urldefrag(current)[0]} | ({urldefrag(asked)[0]} if asked else set())  # the page has two names after a redirect
         return "" if target in itself else target
+
+    @staticmethod
+    def _document_base(soup: BeautifulSoup, served: str) -> str:
+        """What a relative link of the page is resolved against: its FIRST `<base href>` (the rest are ignored), itself resolved
+        against the address the page was served from, else that address."""
+        base_tag = soup.select_one("base[href]")
+        return urljoin(served, base_tag["href"].strip()) if base_tag is not None else served
 
     @staticmethod
     def _says_disabled(link) -> bool:
@@ -542,7 +547,7 @@ class ScrapeAdapter:
     # ---- login -------------------------------------------------------------------------------------
 
     def _login(self) -> None:
-        response, _ = self._fetch(self.cfg.login_url, login_page=True)
+        response, served = self._fetch(self.cfg.login_url, login_page=True)
         soup = BeautifulSoup(self._decode(response), PARSER)
         self._refuse_a_challenge(soup)
         password_input = soup.select_one("input[type=password]")
@@ -552,7 +557,7 @@ class ScrapeAdapter:
         hidden = {i["name"]: i.get("value", "") for i in form.find_all("input", type="hidden") if i.get("name")}
         if self.cfg.csrf_field and not hidden.get(self.cfg.csrf_field):
             raise _Stop("E_LOGIN_FORM", f"the login form has no hidden field named {self.cfg.csrf_field}")
-        action = urljoin(self.cfg.login_url, form.get("action") or self.cfg.login_url)
+        action = urljoin(self._document_base(soup, served), form.get("action") or served)  # the form's link is a link like any other
         if _origin(action) != _origin(self.cfg.start_url):
             raise _Stop("E_OFFSITE", "the login form posts to another site")
         data = {**hidden, self.cfg.username_field: self._username, self.cfg.password_field: self._password}
