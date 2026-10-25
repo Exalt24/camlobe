@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from typing import Callable
 
 import requests
 
@@ -9,12 +13,24 @@ from .paged import FatalError, PagedAdapter, PermanentError, TransientError
 from .transport import CONFIG_CODE, CONFIG_PHRASE, classify
 
 
-def _retry_after(response: requests.Response) -> float | None:
+def _retry_after(response: requests.Response, now: Callable[[], float] | None = None) -> float | None:
+    """Seconds the server asks for, from `Retry-After` in either form RFC 9110 allows (a number of seconds, or an HTTP date: the
+    wait is the date minus now). Never below zero; None when the header is absent or is neither. REST, SOAP and the scraper all
+    read it here. `now` is the wall clock (injected in tests)."""
     value = response.headers.get("Retry-After")
-    try:
-        return max(0.0, float(value)) if value is not None else None
-    except ValueError:  # an HTTP date: not worth parsing, fall back to the backoff
+    if value is None:
         return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value.strip())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when.tzinfo is None:  # "-0000" says the zone is not known: HTTP dates are GMT
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, when.timestamp() - (now or time.time)())
 
 
 def _json_body(response: requests.Response):
@@ -24,7 +40,10 @@ def _json_body(response: requests.Response):
 
 
 class RestAdapter(PagedAdapter):
-    def __init__(self, url: str, token: str | None = None, timeout: tuple[float, float] = (5.0, 20.0), session=None, **kwargs):
+    def __init__(
+        self, url: str, token: str | None = None, timeout: tuple[float, float] = (5.0, 20.0), session=None,
+        wall_clock: Callable[[], float] = time.time, **kwargs,
+    ):
         # the URL is the source identity and is stored with the run, so it must never carry a secret
         if "?" in url or "@" in url.split("//", 1)[-1].split("/", 1)[0]:
             raise ValueError("pass credentials as a token, not inside the URL")
@@ -32,6 +51,7 @@ class RestAdapter(PagedAdapter):
         self.url = url
         self.timeout = timeout
         self.session = session or requests.Session()
+        self._wall_clock = wall_clock  # a Retry-After date is measured against this, not against the monotonic clock
         self.headers = {"Accept": "application/json"}
         self._token = token or ""
         if token:
@@ -54,7 +74,7 @@ class RestAdapter(PagedAdapter):
         if status in (401, 403):
             raise FatalError(f"HTTP {status}: the source refused our credentials")
         if status == 429 or status >= 500:
-            raise TransientError(f"HTTP {status}", retry_after=_retry_after(response))
+            raise TransientError(f"HTTP {status}", retry_after=_retry_after(response, self._wall_clock))
         if status >= 400:
             raise PermanentError(f"HTTP {status}")
         try:

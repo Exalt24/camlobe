@@ -152,6 +152,8 @@ class _SoapHandler(BaseHTTPRequestHandler):
             else:
                 data = b""
             self.send_response(status)
+            if status == 429 and self.behaviour.retry_after is not None:
+                self.send_header("Retry-After", str(self.behaviour.retry_after))
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)

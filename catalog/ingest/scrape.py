@@ -288,6 +288,7 @@ class ScrapeAdapter:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         jitter: Callable[[float], float] | None = None,
+        wall_clock: Callable[[], float] = time.time,
     ):
         self.cfg = config
         _check_url(config.start_url, "start_url")
@@ -321,7 +322,7 @@ class ScrapeAdapter:
                 # a value read from the environment is checked when the run starts, so the failure is a run record in the
                 # same place as every other feed failure; the message names the variable and never a part of its value
                 self._proxy_problem = f"the proxy in {name} is not a usable proxy URL: {problem}"
-        self._sleep, self._clock = sleep, clock
+        self._sleep, self._clock, self._wall_clock = sleep, clock, wall_clock
         self._jitter = jitter or (lambda d: random.uniform(d / 2, d))
         self._last_request: float | None = None
         self._crawl_delay = 0.0
@@ -612,7 +613,7 @@ class ScrapeAdapter:
                 if status == 403:
                     raise _Stop("E_BLOCKED", "HTTP 403: the site refused the request; it is not retried and nothing is done about it")
                 if status == 429:
-                    asked = _retry_after(response)
+                    asked = _retry_after(response, self._wall_clock)
                     if asked is not None and asked > cfg.backoff_cap:
                         raise _Stop("E_RATE_LIMITED", f"the site asked for a wait of {asked:g} s, longer than the {cfg.backoff_cap:g} s allowed")
                     self._stats["rate_limited"] += 1

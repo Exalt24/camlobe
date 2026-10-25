@@ -1047,3 +1047,57 @@ def test_the_status_a_redirected_robots_txt_ends_on_is_read_as_for_any_robots_tx
 def test_a_robots_txt_redirect_with_no_location_is_unavailable():
     out, _, notes = run_with_robots(lambda host, path: (301, {}, ""))
     assert codes(out) == [] and len(rows(out)) == 2 and notes["robots"].startswith("none")
+
+
+# ---- F9: Retry-After as an HTTP date --------------------------------------------------------------------------------------------
+
+
+WALL = 1_800_000_000
+
+
+def limited(retry_after, times=2, status=429):
+    state = {"n": 0}
+
+    def route(url):
+        if "page=1" in url and state["n"] < times:
+            state["n"] += 1
+            return status, {"Retry-After": retry_after}, "slow down"
+        return 200, {}, products_table([part(1), part(2)])
+
+    return route
+
+
+def scrape_with_wall_clock(route, **changes):
+    clock, waits = Clock(), []
+
+    def wait(seconds):
+        waits.append(seconds)
+        clock.sleep(seconds)
+
+    base = dict(start_url=f"{BASE}/catalog?page=1", delay_seconds=0.0, respect_robots=False, max_retries=3, backoff_base=0.5, backoff_cap=30.0)
+    base.update(changes)
+    adapter = ScrapeAdapter(ScrapeConfig(**base), session=PageSession(route), sleep=wait, clock=clock.time, jitter=lambda d: d, wall_clock=lambda: WALL)
+    return adapter, waits
+
+
+def test_a_429_with_a_retry_after_date_waits_what_the_date_says():
+    from email.utils import formatdate
+
+    adapter, waits = scrape_with_wall_clock(limited(formatdate(WALL + 7, usegmt=True)))
+    out = records(adapter)
+    assert codes(out) == [] and len(rows(out)) == 2 and waits == [7.0, 7.0]
+
+
+def test_a_retry_after_date_above_the_cap_is_not_waited_and_ends_the_run_with_the_code():
+    from email.utils import formatdate
+
+    adapter, waits = scrape_with_wall_clock(limited(formatdate(WALL + 3600, usegmt=True)))
+    out = records(adapter)
+    assert codes(out) == ["E_RATE_LIMITED"] and waits == [] and "3600" in out[-1].message
+
+
+def test_a_retry_after_date_in_the_past_is_the_ordinary_backoff():
+    from email.utils import formatdate
+
+    adapter, waits = scrape_with_wall_clock(limited(formatdate(WALL - 60, usegmt=True)))
+    assert codes(records(adapter)) == [] and waits == [0.5, 1.0]

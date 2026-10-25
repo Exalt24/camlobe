@@ -477,3 +477,71 @@ def test_soap_every_exception_requests_can_raise_is_a_gap_or_a_failure_with_a_fi
     else:
         assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["where"] == "positions 51-100"
         assert run.rows_written == 100 and calls.count(50) == 2
+
+
+# ---- second output round: Retry-After in either of its two forms, for REST, SOAP and the scraper (one shared function) -----------
+
+
+from email.utils import formatdate  # noqa: E402
+
+from hypothesis import given, settings as hyp_settings  # noqa: E402
+from hypothesis import strategies as st  # noqa: E402
+
+from catalog.ingest.rest import _retry_after  # noqa: E402
+
+NOW = 1_800_000_000  # a fixed second of the wall clock, so a date in a header is a known number of seconds ahead
+
+
+def http_date(ahead):
+    return formatdate(NOW + ahead, usegmt=True)
+
+
+def response_with(value):
+    response = requests.Response()
+    response.headers["Retry-After"] = value
+    return response
+
+
+@pytest.mark.parametrize(
+    "value, want",
+    [
+        ("3", 3.0), (" 7 ", 7.0), ("0", 0.0), ("-5", 0.0), ("2.5", 2.5),
+        (http_date(20), 20.0), (formatdate(NOW + 20), 20.0), (http_date(0), 0.0), (http_date(-3600), 0.0),  # a date already past is no wait at all
+        ("tomorrow", None), ("", None), ("Wed, 99 Foo 2027 99:99:99 GMT", None),
+    ],
+)
+def test_retry_after_is_read_in_both_forms_and_never_below_zero(value, want):
+    assert _retry_after(response_with(value), lambda: NOW) == want
+
+
+def test_a_response_with_no_retry_after_has_no_wait():
+    assert _retry_after(requests.Response(), lambda: NOW) is None
+
+
+@given(st.integers(0, 3600))
+@hyp_settings(max_examples=100, deadline=None)
+def test_a_date_n_seconds_ahead_asks_for_what_the_number_n_asks_for(seconds):
+    """The class: the date form. Whatever the wait, the two forms of the header are the same wait."""
+    assert _retry_after(response_with(http_date(seconds)), lambda: NOW) == _retry_after(response_with(str(seconds)), lambda: NOW) == float(seconds)
+
+
+def test_rest_waits_what_a_retry_after_date_says(rest):
+    sleep = NoSleep()
+    _, url = rest(Behaviour(catalog_items(50), script={0: [429]}, retry_after=http_date(3)))
+    ingest(get_supplier(), RestAdapter(url, page_size=100, sleep=sleep, backoff_base=0.5, wall_clock=lambda: NOW))
+    assert sleep.calls == [3.0]
+
+
+def test_rest_does_not_wait_longer_than_its_cap_for_a_retry_after_date(rest):
+    sleep = NoSleep()
+    _, url = rest(Behaviour(catalog_items(50), script={0: [429]}, retry_after=http_date(3600)))
+    ingest(get_supplier(), RestAdapter(url, page_size=100, sleep=sleep, backoff_base=0.5, backoff_cap=10.0, wall_clock=lambda: NOW))
+    assert sleep.calls == [10.0]
+
+
+def test_soap_waits_what_a_retry_after_says_in_either_form(soap):
+    for value, wait in ((http_date(4), 4.0), ("6", 6.0)):
+        sleep = NoSleep()
+        _, wsdl = soap(Behaviour(catalog_items(40), script={0: [429]}, retry_after=value))
+        run = ingest(get_supplier(f"soap{wait}"), SoapAdapter(wsdl, page_size=50, sleep=sleep, backoff_base=0.5, wall_clock=lambda: NOW))
+        assert run.status == PipelineRun.Status.SUCCEEDED and sleep.calls == [wait]

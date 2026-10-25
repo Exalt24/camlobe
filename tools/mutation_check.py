@@ -491,6 +491,11 @@ MUTANTS: list[Mutant] = [
     D("scrape: robots.txt is followed one redirect short", "scrape", "_read_robots", "Add -> Sub", "for _ in range(MAX_ROBOTS_REDIRECTS + 1)", PAGES),
     D("scrape: robots.txt is followed one redirect too far", "scrape", "_read_robots", "1 -> 2", "for _ in range(MAX_ROBOTS_REDIRECTS + 1)", PAGES),
     D("scrape: a robots.txt redirect to https is not followed", "scrape", "_read_robots", "string 'http' -> ''", 'not in ("http", "https")', PAGES),
+    # F9: Retry-After in the date form, read in one place for REST, SOAP and the scraper
+    D("rest: a Retry-After date is no wait at all", "rest", "_retry_after", "return value -> None", "when.timestamp()", REMOTE),
+    D("rest: a Retry-After date is added to now instead of taken from it", "rest", "_retry_after", "Sub -> Add", "when.timestamp()", REMOTE),
+    D("rest: a Retry-After date of an unknown zone is read as local time", "rest", "_retry_after", "negate the condition", "if when.tzinfo is None", REMOTE),
+    D("soap: the Retry-After of a throttled answer is not remembered", "soap", "post", "negate the condition", "response.status_code >= 429", REMOTE),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]
