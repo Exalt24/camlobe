@@ -247,3 +247,18 @@ def test_the_ingest_command_flags_a_snapshot_supplier_and_reports_the_delisting(
     assert not Supplier.objects.get(code="s1").full_snapshot
     with pytest.raises(CommandError, match="opposites"):
         call_command("ingest_feed", "s1", "--snapshot", "--incremental", "--file", str(day1))
+
+
+def test_a_row_rejected_for_its_cost_is_still_a_row_the_feed_lists(tmp_path):
+    s = snapshot_supplier()
+    run_all(s, day(tmp_path, "day1.csv", [X, Y]))
+    run = run_all(s, day(tmp_path, "day2.csv", [X, row("H4002A", "Marlow", "Hose", "five dollars")]))  # the cost is junk, the part is there
+    assert run.rows_rejected == 1 and run.notes["snapshot"]["delisted"] == 0
+    assert listing("H4002A", s).delisted_at is None
+
+
+def test_a_supplier_that_is_not_a_snapshot_is_never_touched_even_when_asked(tmp_path):
+    s = snapshot_supplier(flag=False)
+    run_all(s, day(tmp_path, "day1.csv", [X, Y]))
+    run_all(s, day(tmp_path, "day2.csv", [X]))
+    assert apply_snapshot(s) == {} and not PartSource.objects.filter(delisted_at__isnull=False).exists()

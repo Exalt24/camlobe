@@ -8,16 +8,21 @@
 | SFTP | `--sftp-host H --sftp-path /feed.csv --sftp-user U --sftp-password-env NAME --sftp-host-key SHA256:...` | checks the host key against the fingerprint you give, downloads to a temporary file, checks the size before and after, then reads it like a local file |
 | Paged REST | `--rest-url URL [--token-env NAME] [--page-size N] [--rate-limit PER_SECOND]` | `GET url?offset=&limit=` answering `{"items": [...], "total": N}` |
 | SOAP | `--soap-wsdl URL [--page-size N]` | calls `GetCatalogPage(offset, limit)` through zeep |
+| A site with a login | `--scrape-config FILE.json` | logs in and reads the product table page by page: see [Scraping a site](#scraping-a-site) |
+
+Every source also takes `--snapshot` (this supplier's feed lists everything it offers, see [Full snapshots](#full-snapshots-and-delisting)) or `--incremental` (it does not), and `--allow-mass-delist`.
 
 ## Mapping
 
-Columns are matched by name, never by position, after lower casing and dropping punctuation. `item_number`, `PartNo`, `sku` and `Item Number` all mean the part number. A reordered file loads the same rows, and a rename to a known alias loads as before. A required column (part number, brand, cost) that no header maps to fails the run before a row is written, with the headers the feed does have in the message. Two headers for one field is also refused. Columns that map to nothing are listed in the run's notes.
+Columns are matched by name, never by position, after lower casing and dropping punctuation. `item_number`, `PartNo`, `sku` and `Item Number` all mean the part number. A reordered file loads the same rows, and a rename to a known alias loads as before. A required column (part number, brand, cost) that no header maps to fails the run before a row is written, with the headers the feed does have in the message. Two headers for one REQUIRED field (`SKU` and `MPN`) is also refused, because which one is the supplier's number is a decision and not a default. Two headers for an OPTIONAL field are ordinary (`UPC` and `EAN` side by side): a row takes the first valid GTIN from left to right, or the first non empty value when none is valid (so a bad GTIN is still flagged and not dropped), and the first non empty description. The run's notes say which columns were doubled and how often each was used (`doubled_columns`, `column_choices`). Columns that map to nothing are listed in the run's notes.
 
 Costs are parsed with `Decimal` into integer cents. `12,50` (a decimal comma looks like a thousands separator), `12.505` (half a cent), `-3`, `N/A` and anything above ten million dollars are rejected rows, never guessed.
 
 ## Encodings
 
-CSV lines are decoded one at a time: UTF-8 first, windows-1252 when that fails, so one pasted latin line does not turn every accent in the file into noise. A byte windows-1252 does not define rejects that row (`undecodable_bytes`). A UTF-8 byte order mark is skipped, and the delimiter (comma, semicolon, tab or pipe) is read from the header line. XML is parsed with DTDs and entities forbidden. A row with the wrong number of cells is rejected (`column_count`).
+CSV lines are decoded one at a time: UTF-8 first, windows-1252 when that fails, so one pasted latin line does not turn every accent in the file into noise. A byte windows-1252 does not define rejects that row (`undecodable_bytes`). A UTF-8 byte order mark is skipped, and the delimiter (comma, semicolon, tab or pipe) is read from the header line. A UTF-16 or UTF-32 file (Excel's "Unicode Text" export is UTF-16) is found by its byte order mark, or without one by a NUL in every second byte, and decoded whole; the run's notes say `encoding`. One stray NUL in an ordinary file is not mistaken for that, and a NUL inside any row of any source rejects that row (`nul_character`), because Postgres cannot store it. A row with the wrong number of cells is rejected (`column_count`).
+
+XML is parsed with DTDs and entities forbidden. A record is a direct child of the root. Its fields are its own attributes, then its child elements by name, and an attribute of a child as `child@attribute`. A namespace is dropped from every name: `<catalog xmlns="urn:x"><item><sku>` and `<c:sku>` are both `sku`.
 
 ## What a run records
 
@@ -26,7 +31,7 @@ Every run is a row in `catalog_pipelinerun`: kind, supplier, source, status (`ru
 ## Restart and re-run
 
 - Each batch of 1000 rows is one transaction holding its rows, its rejected rows, the run counters and the checkpoint.
-- A source is skipped when its content hash equals the last complete run's. A file with the same name and new content is read from the start, and only the rows that changed are stored.
+- A source is skipped when its content hash equals the last complete run's, and a skipped run delists nothing. A file with the same name and new content is read from the start, and only the rows that changed are stored.
 - A row is stored when its content differs from the newest stored version of the same supplier part number. A price that goes from A to B and back to A stores three versions, so the current price is the last one.
 - Each source row also has an idempotency key (supplier, source, position, content hash) with a unique constraint, which is what stops rows after a gap landing twice when they are read again.
 - A run left `running` by a dead process is closed as failed at the next start. Two runs of one source cannot overlap (Postgres advisory lock).
@@ -34,3 +39,52 @@ Every run is a row in `catalog_pipelinerun`: kind, supplier, source, status (`ru
 ## Paged sources
 
 Requests are spaced by the rate limit. A timeout, connection error, 429 or 5xx is retried with exponential backoff, a `Retry-After` is honoured up to the cap. A page that still fails, or a 4xx retrying cannot fix, becomes a gap: the run is `partial`, the checkpoint stops at the gap, the pages after it are still read, and the next run adds only the missing page. A 401 or 403 stops the run at once. Three failed pages in a row mean the endpoint is down. A page shorter than asked for in the middle of a known total stops the run, because the server capped the page size and carrying on would skip rows.
+
+
+When the total is unknown (the server sends none), a short page proves nothing, because the server may cap its pages. Paging goes on, each request starting where the last answer ended, until a page comes back empty. With a known total the guard above stays. A page whose items are exactly those of a page already read in the same run (a server that answers every offset with page 0) is a gap coded `E_PAGE_REPEATED`: its rows are not stored a second time, the run is `partial`, the checkpoint stops there, and the rows that belong at that offset are reported as missing (positions in the error). With no total, or three in a row, the run stops. A page of one item is never called a repeat, since a feed may list the same row twice. This detects a page repeated whole, not pages that overlap.
+
+## Full snapshots and delisting
+
+A supplier whose feed lists everything it offers is flagged once with `ingest_feed <supplier> --snapshot ...` (and unflagged with `--incremental`). While flagged, each batch also records which supplier parts the pass read, including rows that did not change (they store no raw row, so nothing else says they are still listed). When a pass over the source finishes and the run is `succeeded`, every listing of that supplier that the pass did not read gets `delisted_at`, and a delisted listing that the pass reads again is relisted. The supplier's snapshot is its latest completed pass over any of its sources, so a feed that arrives under a new file name every day works, and a supplier that sends two feeds at the same time (brakes in one file, filters in the other) must not be flagged.
+
+Delisted listings are ignored by the search document (`suppliers`, `supplier_count`, `lowest_cost_cents`), by the REST part detail (`sources` holds the live ones, `delisted_sources` the others) and by `purchase_order_for`, which refuses a part that only a delisted listing offers with `E_DELISTED`. The part itself stays in the catalog and in search. A delisting bumps the part's search version, so the next index sync sends it.
+
+What keeps a bad file from emptying a catalog: a partial or failed run delists nothing; a pass that rejected a row it could not read (`column_count`, `undecodable_bytes`, `nul_character`) delists nothing, since that row might have been any part; a pass that read no part delists nothing; and a pass that would delist more than half of a supplier's listings (when it has at least ten) delists nothing unless `--allow-mass-delist` is given, since a truncated file reads cleanly. The run's notes say what happened (`snapshot`: `delisted`, `relisted`, `delist_refused`). The match step and `resolve_review` check new listings against the latest snapshot too, so a part ingested before the newer feed but matched after it is delisted at once. A row rejected only for its cost still counts as listed.
+
+## Scraping a site
+
+`catalog/ingest/scrape.py`, `ScrapeAdapter`, behind the same interface as the others. **It was built and tested against a local fake site only and has never been run against a real one.** Use it only on a site whose owner has allowed it, under terms you have read: `robots.txt` is checked and a challenge ends the run, and neither is permission.
+
+`ingest_feed <supplier> --scrape-config shop.json`, where the file is:
+
+```json
+{
+  "start_url": "https://shop.example/catalog?page=1",
+  "login_url": "https://shop.example/login",
+  "username_env": "SHOP_USER",
+  "password_env": "SHOP_PASS",
+  "session_cookie": "sid",
+  "cookie_jar": "shop.cookies",
+  "table_selector": "table.products",
+  "next_selector": "a[rel=next]",
+  "delay_seconds": 1.0,
+  "user_agent": "camlobe-feed/1.0 (contact: you@example.com)",
+  "proxy_envs": ["SHOP_PROXY"]
+}
+```
+
+`username_env`, `password_env` and `proxy_envs` are the NAMES of environment variables. The credentials are read in the constructor, kept in two private attributes, and appear in no note, run record, log line or exception (a test searches for them). A proxy URL with a password goes in `proxy_envs`; `proxies` refuses one. The other settings and their defaults are the fields of `ScrapeConfig`.
+
+| Step | Rule |
+|---|---|
+| robots.txt | fetched once and every URL checked (`respect_robots`, on by default); the site's `Crawl-delay` raises the pause; a missing file means no rules, a server error reads as everything disallowed (`E_ROBOTS_UNAVAILABLE`); a refusal is `E_ROBOTS` |
+| Login | the form with the password field is read, every hidden field (the CSRF token among them) is posted with the credentials; no `csrf_field` in the form is `E_LOGIN_FORM`, a refused login `E_LOGIN_FAILED` |
+| Session | the cookie jar can be saved to `cookie_jar` and loaded next run (it holds a live session: it is gitignored, written with owner only rights where the system allows, and is a secret); an expired session (a redirect to the form, the form in a 200, or a 401) is logged in again ONCE, the second expiry ends the run `E_SESSION_EXPIRED` |
+| Pace | `delay_seconds` between any two requests; a 429 waits what `Retry-After` says (a wait above `backoff_cap` is not waited: `E_RATE_LIMITED`), a 5xx or a timeout is retried with exponential backoff, then `E_SERVER_ERROR` or `E_UNREACHABLE` |
+| Proxies | requests go through the first live proxy; one that refuses or drops the connection is skipped for the next; all failing is `E_PROXY_UNAVAILABLE` and nothing goes direct. The system proxy settings and `.netrc` are ignored |
+| Pages | the `next` link, same site only (`E_OFFSITE`), never twice (`E_PAGE_LOOP`), up to `max_pages` (`E_TOO_MANY_PAGES`); redirects are followed by hand, three hops, same site |
+| Table | cells under the header text become the record, which the usual header mapping reads (`Part No`, `Brand`, `Description`, `Price`); a row with the wrong number of cells is rejected `column_count`; the HTML is read with BeautifulSoup on the lxml parser, which closes a cell the way a browser does |
+
+A block or challenge is never data. HTTP 403 is `E_BLOCKED` and is not retried; a 200 page that carries a challenge marker (`challenge_markers`: "checking your browser", `g-recaptcha`, "captcha", "access denied" and a few more) anywhere outside the product table is `E_CHALLENGE`; a page with no product table is `E_UNEXPECTED_PAGE`. Each ends the run as a gap, so the run is `partial`, the rows read before it are kept, nothing is stored from the page that stopped it, and nothing is done to get past it. A product whose description says "captcha" is a product: the table is left out of the marker scan.
+
+A site has no random access, so a resume reads the pages again from the start and skips the rows already stored. The fingerprint is empty (a live source), so a finished run is read again by the next one.

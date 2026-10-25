@@ -18,6 +18,7 @@ WORLD = [
     row("0000766611428", "Marlow", "Cabin filter padded export", "9.00"),  # a padded export of another brand's 766611428
     row("DUZR7208", "Tarn", "Thermostat housing", "21.00"),  # a Tarn number that really begins with DU
     row("K80123", "Halden", "Strut assembly front", "140.00"),
+    row("A1B2C", "Halden", "Bushing", "4.00"),  # a short number: too short to normalise with a rule, found as typed
 ]
 
 
@@ -57,6 +58,11 @@ def test_a_number_as_the_supplier_prints_it_finds_the_canonical_part(backend):
     assert ask("mrl h4123a")[0] == ["MARLOW:H4123A"]
 
 
+def test_a_short_number_is_searched_as_typed(backend):
+    assert ask("a1")[0] == ["HALDEN:A1B2C"] and ask("A1B2")[0] == ["HALDEN:A1B2C"]
+    assert ask("a2")[0] == []
+
+
 def test_a_form_that_belongs_to_one_brand_matches_only_that_brand(backend):
     assert ask("MF-ZR7208")[0] == []  # Marlow's prefix, and Marlow has no ZR7208: the Dunmore part is not a guess
     assert ask("KB-ZR7208")[0] == []
@@ -82,13 +88,14 @@ def test_a_text_query_searches_brand_and_description_only_never_the_number(backe
     assert ask("mar")[0] == ["MARLOW:766611428", "MARLOW:H4123A"]  # a word prefix of the brand
     assert ask("filter oil")[0] == ["MARLOW:H4123A"]  # every word must be there, in any order
     assert ask("brake zzz") == ([], 0)  # a word that is nowhere does not get dropped to find the rest
+    assert ask("ilter") == ([], 0)  # the start of a word, not any part of it
 
 
 QUERIES = [
     "0766611428", "kestrel 0766611428", "kb-0766611428", "DU-ZR7208", "du zr 7208", "ZR7208", "zr72", "MF-H4123A", "h4123a",
     "marlow mf-h4123a", "mrl h4123a", "5012345678900", "5012-3456-78900", "5012345678917", "766611428", "0766", "7666",
     "---", "#", " - ", ".", "ZR", "zr", "DU", "oil", "oil filter", "filter oil", "mar", "marlow", "brake pad", "brake zzz",
-    "strut", "str", "spark plug", "a", "x", "1", "-1", "9", "H4123C", "h4124a", "pad set front", "cabin filter", "tarn thermostat",
+    "strut", "str", "ilter", "spark plug", "a", "x", "1", "-1", "9", "a1", "A1B2C", "H4123C", "h4124a", "pad set front", "cabin filter", "tarn thermostat",
 ]
 
 

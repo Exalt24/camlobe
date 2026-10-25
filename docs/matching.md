@@ -39,3 +39,7 @@ Rows are decided in id order, so a run is deterministic. When several versions o
 - There is no fuzzy matching between numbers and no supersession table. A renumbered part appears as a `gtin_cross` item or as a new part.
 - The zero variant check covers all digit numbers only. A zero run after letters (`AB0123` against `AB123`) is not compared, since no export rule in these notes pads that shape.
 - A change to the normalisation rules does not re match old rows. Rows carry the rule version, and the normalize command reports how many are stale.
+
+## Delisting: a part the supplier no longer offers
+
+Matching never removes a listing, and a part a supplier drops from its next feed would otherwise stay offered at its old cost for ever. A supplier flagged as a full snapshot (`ingest_feed --snapshot`) gets `PartSource.delisted_at` set, by the end of a complete succeeded run, on every listing the run did not read, and cleared again when a later complete run reads it. The Part and its other suppliers' listings are untouched. Search documents, the lowest cost, the REST API and purchase orders ignore a delisted listing; the rules and the guards that keep a bad file from delisting a catalog are in [feeds.md](feeds.md#full-snapshots-and-delisting). The match step and `resolve_review` apply the same check to listings they create, so the order the steps run in does not change the result.

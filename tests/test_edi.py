@@ -412,6 +412,7 @@ def test_856_an_order_level_with_no_prf_is_a_coded_error_never_a_crash():
         [BSN, H1, H2, H3, LIN, SN1, "CTT*3"],  # the only order has no PRF
         [BSN, H1, H2, "CTT*2"],  # an order with no PRF and no items
         [BSN, H1, "HL*2*1*O", "PRF*PO-A", "HL*3*1*O", "HL*4*3*I", LIN, SN1, "CTT*4"],  # the second has none: its item is not PO-A's
+        [BSN, H1, H2, PRF, H3, LIN, SN1, "HL*4*1*O", "CTT*4"],  # a good order, then an order level with no PRF and no items
     ):
         refused(wrap("856", body), "E_MISSING_SEGMENT")
 
