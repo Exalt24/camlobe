@@ -5,7 +5,7 @@ import pytest
 from django.test import Client
 
 from catalog.edi.orders import OrderError, purchase_order_for
-from catalog.ingest.adapters import FileAdapter
+from catalog.ingest.adapters import FileAdapter, SourceGap, SourceRecord
 from catalog.ingest.paged import PagedAdapter, PermanentError
 from catalog.ingest.runner import ingest
 from catalog.matching import match_pending
@@ -262,3 +262,124 @@ def test_a_supplier_that_is_not_a_snapshot_is_never_touched_even_when_asked(tmp_
     run_all(s, day(tmp_path, "day1.csv", [X, Y]))
     run_all(s, day(tmp_path, "day2.csv", [X]))
     assert apply_snapshot(s) == {} and not PartSource.objects.filter(delisted_at__isnull=False).exists()
+
+
+# ---- second output round: a pass that has not finished never replaces the latest completed one -------------------------
+
+
+class Feed:
+    """A source with an address of its own: it lists parts 1..n, and with `cut` a page fails after that many rows (a partial pass).
+    `resumable=False` is a live site (a scrape restarts every run), `fingerprint` a file's content identity ("" for a live API)."""
+
+    def __init__(self, ref, n, cut=None, resumable=True, fingerprint=""):
+        self.source_ref, self.n, self.cut, self.resumable, self._fingerprint = ref, n, cut, resumable, fingerprint
+
+    def fingerprint(self):
+        return self._fingerprint
+
+    def notes(self):
+        return {}
+
+    def records(self, start_after=0):
+        for i in range(1, self.n + 1):
+            if i <= start_after and self.resumable:
+                continue
+            if self.cut is not None and i == self.cut + 1:
+                yield SourceGap(i, self.n, "E_CHALLENGE: the page carries a bot challenge")
+                return
+            yield SourceRecord(i, {"PartNo": f"H40{i:02d}A", "Mfr": "Marlow", "Cost": "1.00"})
+
+
+def live_count(s):
+    return PartSource.objects.filter(supplier=s, delisted_at__isnull=True).count()
+
+
+@pytest.mark.parametrize("resumable, fingerprints", [(False, ("", "", "")), (True, ("", "", "")), (True, ("a", "b", "c"))])
+def test_a_partial_pass_leaves_the_latest_completed_pass_as_it_was_and_delists_nothing(resumable, fingerprints):
+    """The class: the supplier's snapshot is the latest COMPLETED pass over any of its sources. A source that starts its pass
+    again used to clear its own completed flag and its seen set, so one partial run made the match step fall back to an older
+    pass of ANOTHER source (the site's old address, a file of last month) and delist what the site still offers."""
+    s = snapshot_supplier()
+    ingest(s, Feed("old-address", 8, resumable=resumable, fingerprint="o"))
+    normalize_pending(), match_pending()
+    ingest(s, Feed("new-address", 12, resumable=resumable, fingerprint=fingerprints[0]))
+    normalize_pending(), match_pending()
+    assert live_count(s) == 12
+    partial = ingest(s, Feed("new-address", 12, cut=6, resumable=resumable, fingerprint=fingerprints[1]))
+    normalize_pending(), match_pending()
+    assert partial.status == PipelineRun.Status.PARTIAL
+    assert live_count(s) == 12 and not PartSource.objects.filter(delisted_at__isnull=False).exists()
+    assert apply_snapshot(s)["pass_source"] == "new-address"  # the pass that stays the latest is the last completed one
+    kept = SnapshotSeen.objects.filter(checkpoint__source_ref="new-address", staging=False).count()
+    assert kept == 12  # and its seen set is untouched by the pass that has not finished
+    done = ingest(s, Feed("new-address", 10, resumable=resumable, fingerprint=fingerprints[2]))
+    assert done.status == PipelineRun.Status.SUCCEEDED and done.notes["snapshot"]["delisted"] == 2  # the pass that finishes replaces it
+    assert live_count(s) == 10
+    assert SnapshotSeen.objects.filter(checkpoint__source_ref="new-address", staging=False).count() == 10
+    assert not SnapshotSeen.objects.filter(staging=True).exists()
+
+
+def test_a_run_that_died_inside_a_new_pass_is_resumed_with_the_parts_it_had_already_seen(tmp_path):
+    from catalog.ingest.adapters import FileAdapter
+
+    class Dying(FileAdapter):
+        def records(self, start_after=0):
+            for n, rec in enumerate(super().records(start_after)):
+                if n >= 7:
+                    raise ConnectionError("the connection dropped")
+                yield rec
+
+    s = snapshot_supplier()
+    rows = [row(f"H40{n:02d}A", "Marlow", "Part", "1.00") for n in range(1, 21)]
+    run_all(s, day(tmp_path, "feed.csv", rows))
+    path = day(tmp_path, "feed.csv", [r[:3] + ["1.50", ""] for r in rows[:15]])  # the same file name, new content, five parts gone
+    assert ingest(s, Dying(path), batch_size=5).status == PipelineRun.Status.FAILED
+    assert live_count(s) == 20  # a dead pass delists nothing
+    done = ingest(s, FileAdapter(path), batch_size=5)
+    assert done.status == PipelineRun.Status.SUCCEEDED and done.notes["snapshot"]["delisted"] == 5
+    normalize_pending(), match_pending()
+    assert live_count(s) == 15
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_pass_that_was_running_when_the_staging_migration_ran_keeps_what_it_had_read():
+    from django.db import connection
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connection)
+    executor.migrate([("catalog", "0006_pass_id_on_the_checkpoint")])
+    old = executor.loader.project_state([("catalog", "0006_pass_id_on_the_checkpoint")]).apps
+    Supplier, Checkpoint, Seen = old.get_model("catalog", "Supplier"), old.get_model("catalog", "FeedCheckpoint"), old.get_model("catalog", "SnapshotSeen")
+    sup = Supplier.objects.create(code="mig", name="Mig", full_snapshot=True)
+    running = Checkpoint.objects.create(supplier=sup, source_ref="running", completed=False)
+    done = Checkpoint.objects.create(supplier=sup, source_ref="done", completed=True, completed_at=dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc))
+    Seen.objects.create(checkpoint=running, part_number_raw="A1", brand_raw="")
+    Seen.objects.create(checkpoint=done, part_number_raw="B1", brand_raw="")
+    executor = MigrationExecutor(connection)
+    executor.migrate(executor.loader.graph.leaf_nodes())
+    new = executor.loader.project_state(executor.loader.graph.leaf_nodes()).apps
+    staged = dict(new.get_model("catalog", "SnapshotSeen").objects.values_list("part_number_raw", "staging"))
+    assert staged == {"A1": True, "B1": False}
+    new.get_model("catalog", "SnapshotSeen").objects.all().delete()
+    new.get_model("catalog", "FeedCheckpoint").objects.all().delete()
+    new.get_model("catalog", "Supplier").objects.all().delete()
+
+
+def test_what_a_dead_pass_read_is_not_counted_as_seen_by_the_pass_that_replaces_it(tmp_path):
+    """The file changed again before the dead pass was resumed, so the new pass starts afresh: parts 1 to 5 were read by the
+    dead one and are not in the file now, and the pass that completes must delist them."""
+    from catalog.ingest.adapters import FileAdapter
+
+    class Dying(FileAdapter):
+        def records(self, start_after=0):
+            for n, rec in enumerate(super().records(start_after)):
+                if n >= 7:
+                    raise ConnectionError("the connection dropped")
+                yield rec
+
+    s = snapshot_supplier()
+    rows = [row(f"H40{n:02d}A", "Marlow", "Part", "1.00") for n in range(1, 21)]
+    run_all(s, day(tmp_path, "feed.csv", rows))
+    assert ingest(s, Dying(day(tmp_path, "feed.csv", [r[:3] + ["1.50", ""] for r in rows[:15]])), batch_size=5).status == PipelineRun.Status.FAILED
+    done = ingest(s, FileAdapter(day(tmp_path, "feed.csv", rows[5:])), batch_size=5)
+    assert done.status == PipelineRun.Status.SUCCEEDED and done.notes["snapshot"]["delisted"] == 5

@@ -81,11 +81,16 @@ class SnapshotSeen(models.Model):
     """
 
     checkpoint = models.ForeignKey(FeedCheckpoint, on_delete=models.CASCADE, related_name="seen")
+    # True while the pass that read it has not finished: the set of the last COMPLETED pass (False) stays what the match step
+    # reads until the new one completes, and only then do the two swap
+    staging = models.BooleanField(default=False, db_default=False)
     part_number_raw = models.CharField(max_length=200, blank=True)
     brand_raw = models.CharField(max_length=200, blank=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["checkpoint", "part_number_raw", "brand_raw"], name="one_seen_per_pass")]
+        constraints = [
+            models.UniqueConstraint(fields=["checkpoint", "staging", "part_number_raw", "brand_raw"], name="one_seen_per_pass")
+        ]
 
 
 class RejectedRow(models.Model):

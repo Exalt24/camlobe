@@ -358,7 +358,7 @@ MUTANTS: list[Mutant] = [
     M("runner: a snapshot pass keeps nothing it read", "runner", "if supplier.full_snapshot and seen:", "if False:", DELIST),
     M("runner: an unreadable row is not marked", "runner", '            if reason in UNREADABLE:\n                seen.add(("", ""))', '            if False:\n                seen.add(("", ""))', DELIST),
     M("runner: a row rejected for its cost is not counted as listed", "runner", "            elif (identity := row_identity(rec.fields, mapping)) is not None:", "            elif False:", DELIST),
-    M("runner: a new pass keeps what the last pass read", "runner", "        SnapshotSeen.objects.filter(checkpoint=checkpoint).delete()  # a new pass starts with nothing seen", "        pass", DELIST),
+    D("runner: a new pass keeps what the last pass read", "runner", "_ingest_locked", "delete the call statement", "staging=True).delete()", DELIST),
     M("runner: a NUL in a row fails the whole batch", "runner", "if not reason and any(NUL in value for value in rec.fields.values()):", "if False:", INGEST),
     M("docs: a delisted listing still sets the lowest cost", "docs", 'lowest_cost=Min("sources__cost_cents", filter=Q(sources__delisted_at__isnull=True)),', 'lowest_cost=Min("sources__cost_cents"),', DELIST),
     M("docs: a delisted listing still counts as a supplier", "docs", "live = Q(sources__isnull=False, sources__delisted_at__isnull=True)", "live = Q(sources__isnull=False)", DELIST),
@@ -456,6 +456,12 @@ MUTANTS: list[Mutant] = [
     D("scrape: a next link marked disabled is followed", "scrape", "_says_disabled", "and <-> or", 'any("disabled"', PAGES),
     # ---- the same class in the REST adapter: a JSON answer is read as bytes ------------------------------------------------------------------
     D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
+    # ---- second output round (derived from the syntax tree) ----------------------------------------------------------------------------------
+    # F1: a row is unchanged only when it matches the NEWEST stored version; its key says "this row of THIS pass landed once"
+    D("mapping: a key does not tell one pass from the next", "mapping", "idempotency_key", "negate the condition", "if pass_id:", INGEST, PAGES),
+    # F2: a pass that has not finished never replaces the latest completed pass
+    D("runner: a finished pass does not promote what it read", "runner", "_ingest_locked", "delete the call statement", ".update(staging=False)", DELIST),
+    D("snapshot: the match step reads a pass that has not finished", "snapshot", "seen_listing_keys", "False -> True", "staging=False", DELIST),
 ]
 
 

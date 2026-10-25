@@ -9,7 +9,8 @@ versions and the current price is the last one.
 
 For a supplier flagged `full_snapshot`, the batch also records which supplier parts the pass read (rows that
 did not change store no RawPart, so nothing else says a part is still listed), and a complete, succeeded pass
-ends by delisting what the feed no longer offers (catalog/snapshot.py).
+ends by delisting what the feed no longer offers (catalog/snapshot.py). What a pass reads is kept as `staging` until the run
+completes, so a pass that ends partial leaves the last completed pass (and its seen set) as it was.
 """
 from __future__ import annotations
 
@@ -77,9 +78,8 @@ def _ingest_locked(
         checkpoint.pass_id = run.pk  # a pass is told apart from every other by the run that began it
         checkpoint.position = 0
         checkpoint.completed = False
-        checkpoint.completed_at = None
-        checkpoint.save()
-        SnapshotSeen.objects.filter(checkpoint=checkpoint).delete()  # a new pass starts with nothing seen
+        checkpoint.save()  # completed_at stays: it dates the last COMPLETED pass, whose seen set stays what the match step reads
+        SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=True).delete()  # a new pass starts with nothing seen
     elif checkpoint.completed:
         run.notes["skipped"] = "source unchanged since the last complete run"
         return finish_run(run, PipelineRun.Status.SUCCEEDED)
@@ -120,10 +120,13 @@ def _ingest_locked(
     checkpoint.refresh_from_db()
     if gap_seen:
         return finish_run(run, PipelineRun.Status.PARTIAL)
-    checkpoint.completed = True
-    checkpoint.completed_at = timezone.now()
-    checkpoint.last_run = run
-    checkpoint.save()
+    with transaction.atomic():  # the pass becomes the latest completed one, with its own seen set, in one step
+        SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=False).delete()
+        SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=True).update(staging=False)
+        checkpoint.completed = True
+        checkpoint.completed_at = timezone.now()
+        checkpoint.last_run = run
+        checkpoint.save()
     if supplier.full_snapshot:
         # a complete, succeeded pass over a snapshot feed: whatever it did not list is no longer offered
         run.notes["snapshot"] = apply_snapshot(supplier, allow_mass_delist=allow_mass_delist)
@@ -212,7 +215,8 @@ def _store_batch(
         RejectedRow.objects.bulk_create(rejected)
         if supplier.full_snapshot and seen:
             SnapshotSeen.objects.bulk_create(
-                [SnapshotSeen(checkpoint=checkpoint, part_number_raw=n, brand_raw=b) for n, b in seen], ignore_conflicts=True
+                [SnapshotSeen(checkpoint=checkpoint, staging=True, part_number_raw=n, brand_raw=b) for n, b in seen],
+                ignore_conflicts=True,
             )
         counts = {
             "rows_read": run.rows_read + len(records),

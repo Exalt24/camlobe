@@ -10,6 +10,10 @@ row. The supplier's snapshot is the latest completed pass over any of its source
 of one supplier (brakes in one file, filters in another) are two halves of a catalog, not two snapshots: such a
 supplier must not be flagged.
 
+A pass that has not finished never replaces the latest completed one: the parts it reads are kept apart (`staging`) and swap
+in, with the completion time, only when the run completes. A partial run therefore leaves the last completed pass as it was,
+and the match step cannot fall back to an older pass of another source (the site's old address, last month's file).
+
 Three things keep a bad file from emptying a catalog:
   - a partial or failed run never delists (only a completed pass is looked at);
   - a pass that rejected a row it could not read (column count, undecodable bytes, a NUL) delists nothing,
@@ -33,7 +37,7 @@ CHUNK = 1000
 
 def latest_pass(supplier: Supplier) -> FeedCheckpoint | None:
     return (
-        FeedCheckpoint.objects.filter(supplier=supplier, completed=True, completed_at__isnull=False)
+        FeedCheckpoint.objects.filter(supplier=supplier, completed_at__isnull=False)  # a source on a new pass keeps its last completed one
         .order_by("-completed_at", "-id")
         .first()
     )
@@ -45,7 +49,7 @@ def seen_listing_keys(checkpoint: FeedCheckpoint) -> tuple[set[str], bool]:
 
     keys: set[str] = set()
     unreadable = False
-    for number, brand in SnapshotSeen.objects.filter(checkpoint=checkpoint).values_list("part_number_raw", "brand_raw"):
+    for number, brand in SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=False).values_list("part_number_raw", "brand_raw"):
         if not number:
             unreadable = True
             continue
