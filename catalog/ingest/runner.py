@@ -3,7 +3,9 @@
 Each batch is one transaction holding the rows it stored, the rejected rows, the run counters and the
 checkpoint. A crash can therefore never leave a checkpoint ahead of its rows or rows without their
 count. A re-run starts at the checkpoint, and if it were to re-read rows anyway, the unique
-idempotency key and the "unchanged since the latest stored version" rule keep them from landing twice.
+idempotency key (one row of one pass) and the "unchanged since the latest stored version" rule keep them from landing twice.
+A row is new when its content differs from the NEWEST stored version of the part, so a price that goes 10, 12, 10 is three
+versions and the current price is the last one.
 
 For a supplier flagged `full_snapshot`, the batch also records which supplier parts the pass read (rows that
 did not change store no RawPart, so nothing else says a part is still listed), and a complete, succeeded pass
@@ -72,6 +74,7 @@ def _ingest_locked(
     if restart or checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):
         # new content (or a live source, which has no identity to compare): read it from the start
         checkpoint.fingerprint = fingerprint
+        checkpoint.pass_id = run.pk  # a pass is told apart from every other by the run that began it
         checkpoint.position = 0
         checkpoint.completed = False
         checkpoint.completed_at = None
@@ -171,7 +174,7 @@ def _store_batch(
 
     part_numbers = {row.part_number for _, row, _ in mapped}
     keys = {
-        idempotency_key(supplier.code, run.source_ref, rec.position, chash): None for rec, _, chash in mapped
+        idempotency_key(supplier.code, run.source_ref, rec.position, chash, checkpoint.pass_id): None for rec, _, chash in mapped
     }
     with transaction.atomic():
         seen_keys = set(RawPart.objects.filter(idempotency_key__in=list(keys)).values_list("idempotency_key", flat=True))
@@ -185,7 +188,7 @@ def _store_batch(
         to_insert: list[RawPart] = []
         unchanged = 0
         for rec, row, chash in mapped:
-            key = idempotency_key(supplier.code, run.source_ref, rec.position, chash)
+            key = idempotency_key(supplier.code, run.source_ref, rec.position, chash, checkpoint.pass_id)
             if key in seen_keys or latest.get((row.part_number, row.brand)) == chash:
                 unchanged += 1
                 continue

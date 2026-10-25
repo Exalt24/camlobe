@@ -9,6 +9,8 @@ from unittest import mock
 import psycopg
 import pytest
 from django.conf import settings
+from hypothesis import given, settings as hyp_settings
+from hypothesis import strategies as st
 from django.db import IntegrityError, connection
 from django.db.utils import DatabaseError
 
@@ -114,6 +116,44 @@ def test_a_price_that_changes_and_changes_back_is_stored_each_time(tmp_path):
         ingest(s, FileAdapter(write_csv(tmp_path / name, [row("AB1001", cost=cost)])))
     versions = list(RawPart.objects.filter(part_number_raw="AB1001").order_by("id").values_list("cost_cents", flat=True))
     assert versions == [500, 600, 500]  # the last one is the current price, not a duplicate of the first
+
+
+def test_a_price_that_returns_to_an_earlier_value_in_the_same_file_is_the_newest_version(tmp_path):
+    """The same file name and row position give run 3 the key run 1 had; the key says only that THAT row landed once, it does
+    not say the row is the part's newest version (10.00, 12.00, 10.00 left 12.00 as the current price)."""
+    s = get_supplier()
+    path = tmp_path / "f.csv"
+    counts = []
+    for cost in ("10.00", "12.00", "10.00"):
+        write_csv(path, [row("AB1001", cost=cost), row("AB1002", cost="5.00")])
+        run = ingest(s, FileAdapter(path))
+        counts.append((run.rows_written, run.rows_unchanged))
+    versions = list(RawPart.objects.filter(part_number_raw="AB1001").order_by("id").values_list("cost_cents", flat=True))
+    assert versions == [1000, 1200, 1000] and counts == [(2, 0), (1, 1), (1, 1)]
+    assert RawPart.objects.filter(part_number_raw="AB1002").count() == 1
+
+
+@given(st.lists(st.dictionaries(st.sampled_from(["AB1001", "AB1002", "AB1003"]), st.sampled_from(["10.00", "12.00", "9.50"]), min_size=1), min_size=2, max_size=5))
+@hyp_settings(max_examples=40, deadline=None)
+def test_whatever_the_prices_do_between_runs_the_newest_stored_version_is_the_latest_price(tmp_path_factory, days):
+    """The class: a row counted unchanged because its key exists although it is not the newest stored version. Any sequence of
+    prices over the same file name (so the same positions) stores exactly one version per change and ends on the last price."""
+    import uuid
+
+    s = get_supplier(f"p{uuid.uuid4().hex[:12]}")
+    path = tmp_path_factory.mktemp("days") / "f.csv"
+    expected: dict[str, list[int]] = {}
+    for day in days:
+        parts = sorted(day.items())
+        write_csv(path, [row(number, cost=cost) for number, cost in parts])
+        ingest(s, FileAdapter(path))
+        for number, cost in parts:
+            cents = int(round(float(cost) * 100))
+            if not expected.get(number) or expected[number][-1] != cents:
+                expected.setdefault(number, []).append(cents)
+    for number, versions in expected.items():
+        stored = list(RawPart.objects.filter(supplier=s, part_number_raw=number).order_by("id").values_list("cost_cents", flat=True))
+        assert stored == versions
 
 
 def test_exact_duplicate_rows_in_one_file_are_stored_once(tmp_path):

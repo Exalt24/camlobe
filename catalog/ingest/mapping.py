@@ -180,6 +180,10 @@ def content_hash(row: MappedRow) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def idempotency_key(supplier_code: str, source_ref: str, position: int, content: str) -> str:
+def idempotency_key(supplier_code: str, source_ref: str, position: int, content: str, pass_id: int = 0) -> str:
+    """One source row of one PASS lands once. Without the pass, a price that goes 10, 12, 10 on the same source and position
+    would find run 1's key on run 3 and be counted unchanged while 12 is the newest stored version."""
     text = f"{supplier_code}\x1f{source_ref}\x1f{position}\x1f{content}"
+    if pass_id:  # a pass 0 key is the one rows stored before passes were told apart carry
+        text += f"\x1f{pass_id}"
     return hashlib.sha256(text.encode("utf-8")).hexdigest()

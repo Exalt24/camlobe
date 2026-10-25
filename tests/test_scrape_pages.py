@@ -398,3 +398,59 @@ def test_a_fragment_on_the_real_next_link_is_dropped_before_the_page_is_asked_fo
 def test_an_ordinary_next_link_is_still_followed():
     out = records(adapter_for(catalog(7)))
     assert codes(out) == [] and len(rows(out)) == 7
+
+
+# ---- second output round: a pass is told apart from the next, a restarted walk is a new pass ---------------------------------
+
+
+def priced(price_of, n=2, challenge=None):
+    """A route of n one part pages whose first part costs `price_of()` today; `challenge()` true makes page 2 a bot challenge."""
+
+    def route(url):
+        page = int(url.rsplit("page=", 1)[1])
+        if page == 2 and challenge and challenge():
+            return 200, {}, "<html><body><h1>Checking your browser</h1></body></html>"
+        row = ("MF-H0001A", "Marlow", "Oil filter 1", price_of()) if page == 1 else part(page)
+        nxt = f'<a rel="next" href="/catalog?page={page + 1}">Next</a>' if page < n else ""
+        return 200, {}, products_table([row], nxt=nxt)
+
+    return route
+
+
+def newest_cost(number="MF-H0001A"):
+    return RawPart.objects.filter(part_number_raw=number).order_by("-id").values_list("cost_cents", flat=True).first()
+
+
+def test_a_price_that_goes_10_12_10_over_three_walks_of_the_site_ends_on_10():
+    price = {"now": "10.00"}
+    supplier = get_supplier("flip")
+    counts = []
+    for today in ("10.00", "12.00", "10.00"):
+        price["now"] = today
+        run = ingest(supplier, adapter_for(priced(lambda: price["now"])))
+        counts.append((run.status, run.rows_written, run.rows_unchanged))
+    assert counts == [("succeeded", 2, 0), ("succeeded", 1, 1), ("succeeded", 1, 1)]
+    assert list(RawPart.objects.filter(part_number_raw="MF-H0001A").order_by("id").values_list("cost_cents", flat=True)) == [1000, 1200, 1000]
+
+
+def test_a_price_that_flips_back_between_two_partial_walks_is_still_the_newest_one():
+    """Every walk of a live site starts again, so a partial walk is not a half of a pass: its keys are its own."""
+    price = {"now": "10.00"}
+    blocked = {"on": True}
+    supplier = get_supplier("flip2")
+    for today in ("10.00", "12.00", "10.00"):
+        price["now"] = today
+        run = ingest(supplier, adapter_for(priced(lambda: price["now"], challenge=lambda: blocked["on"])))
+        assert run.status == PipelineRun.Status.PARTIAL
+    assert newest_cost() == 1000 and RawPart.objects.filter(part_number_raw="MF-H0001A").count() == 3
+
+
+def test_a_walk_read_again_after_a_partial_one_stores_nothing_twice():
+    blocked = {"on": True}
+    supplier = get_supplier("again")
+    route = priced(lambda: "10.00", challenge=lambda: blocked["on"])
+    first = ingest(supplier, adapter_for(route))
+    blocked["on"] = False
+    second = ingest(supplier, adapter_for(route))
+    assert (first.rows_written, second.rows_written, second.rows_unchanged) == (1, 1, 1)
+    assert RawPart.objects.count() == 2
