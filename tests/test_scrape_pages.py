@@ -347,3 +347,54 @@ def test_a_latin1_page_holding_a_byte_windows_1252_leaves_undefined_is_still_rea
     body = page_bytes("Würth", "x", "cp1252").replace(b"x</td>", b"x\x81</td>")  # 0x81 is a C1 control in latin-1
     out = records(adapter_for(one_page(body, "text/html; charset=iso-8859-1")))
     assert codes(out) == [] and rows(out)[0].fields["Brand"] == "Würth"
+
+
+# ---- F5: a next link that is not a real next page is the end of the walk, not a loop ------------------------------------
+
+NOT_A_PAGE = [
+    ("#", ""), ("", ""), ("  ", ""), ("javascript:void(0)", ""), ("JavaScript:;", ""),
+    ("/catalog?page=2", ""), ("?page=2", ""), ("/catalog?page=2#top", ""),  # the page itself, with or without a fragment
+    ("/catalog?page=3", ' class="page-link disabled"'), ("/catalog?page=3", ' aria-disabled="true"'),
+    ("/catalog?page=3", " disabled"), ("/catalog?page=3", ' class="next is-disabled"'),
+]
+
+
+def two_pages_with_last_next(href, attrs):
+    def route(url):
+        page = int(url.rsplit("page=", 1)[1].split("#")[0])
+        link = f'<a rel="next" href="{href}"{attrs}>Next</a>' if page == 2 else '<a rel="next" href="/catalog?page=2">Next</a>'
+        return 200, {}, products_table([part(page)], nxt=link)
+
+    return route
+
+
+@pytest.mark.parametrize("href, attrs", NOT_A_PAGE)
+def test_a_next_link_that_is_no_page_ends_a_complete_run_as_a_success(href, attrs):
+    run = ingest(get_supplier("last"), adapter_for(two_pages_with_last_next(href, attrs)))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 2 and not run.errors
+
+
+def test_a_link_to_a_different_page_already_read_is_still_a_loop():
+    def route(url):
+        page = int(url.rsplit("page=", 1)[1].split("#")[0])
+        return 200, {}, products_table([part(page)], nxt=f'<a rel="next" href="/catalog?page={1 if page == 2 else 2}#top">Next</a>')
+
+    run = ingest(get_supplier("loop"), adapter_for(route))
+    assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_PAGE_LOOP")
+
+
+def test_a_fragment_on_the_real_next_link_is_dropped_before_the_page_is_asked_for_or_compared():
+    seen = []
+
+    def route(url):
+        seen.append(url)
+        page = int(url.rsplit("page=", 1)[1].split("#")[0])
+        return 200, {}, products_table([part(page)], nxt=f'<a rel="next" href="/catalog?page={page + 1}#top">Next</a>' if page < 3 else "")
+
+    out = records(adapter_for(route))
+    assert codes(out) == [] and len(rows(out)) == 3 and all("#" not in url for url in seen)
+
+
+def test_an_ordinary_next_link_is_still_followed():
+    out = records(adapter_for(catalog(7)))
+    assert codes(out) == [] and len(rows(out)) == 7

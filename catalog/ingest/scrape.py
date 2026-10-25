@@ -42,7 +42,7 @@ from html.parser import HTMLParser
 from http.cookiejar import LWPCookieJar
 from typing import Callable, Iterator, Mapping
 from urllib import robotparser
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -364,7 +364,7 @@ class ScrapeAdapter:
     def _walk(self) -> Iterator[SourceRecord]:
         if self.cfg.respect_robots:
             self._read_robots()
-        url, seen = self.cfg.start_url, set()
+        url, seen = urldefrag(self.cfg.start_url)[0], set()  # a fragment is never sent and never tells two pages apart
         while url:
             if url in seen:
                 raise _Stop("E_PAGE_LOOP", "a next link leads back to a page already read")
@@ -388,12 +388,31 @@ class ScrapeAdapter:
                     yield SourceRecord(self._position, {}, raw, reject="column_count")
                 else:
                     yield SourceRecord(self._position, dict(zip(header, cells)), raw)
-            nxt = soup.select_one(self.cfg.next_selector)
-            url = urljoin(url, nxt["href"]) if nxt is not None and nxt.get("href") else ""
+            url = self._next_url(soup, url)
             if url and _origin(url) != _origin(self.cfg.start_url):
                 raise _Stop("E_OFFSITE", "a next link leaves the site")
             if not page.html_closed:  # a body cut after the table, or inside the next link, is not the site saying the catalog ended
                 raise _Stop("E_PAGE_TRUNCATED", "the page ends before its html does, so the site may have cut it short (its next link too)")
+
+    def _next_url(self, soup: BeautifulSoup, current: str) -> str:
+        """The URL of the next page, or "" when the page has none. A link that is not a page is "no next page": an empty
+        href, `#`, `javascript:`, a link the site marks disabled (the class or aria-disabled of the last page's pager), and
+        a link back to the page itself. A link to a DIFFERENT page already read is not excused here: the walk calls it a loop."""
+        link = soup.select_one(self.cfg.next_selector)
+        if link is None:
+            return ""
+        href = (link.get("href") or "").strip()
+        if not href or href.startswith("#") or href.lower().startswith("javascript:") or self._says_disabled(link):
+            return ""
+        target = urldefrag(urljoin(current, href))[0]
+        return "" if target == urldefrag(current)[0] else target
+
+    @staticmethod
+    def _says_disabled(link) -> bool:
+        classes = link.get("class") or []
+        if isinstance(classes, str):
+            classes = classes.split()
+        return any("disabled" in c.lower() for c in classes) or str(link.get("aria-disabled", "")).strip().lower() == "true" or link.has_attr("disabled")
 
     @staticmethod
     def _table(table) -> tuple[list[str], list[list[str]]]:

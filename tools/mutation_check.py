@@ -450,6 +450,10 @@ MUTANTS: list[Mutant] = [
     D("scrape: the charset of a meta tag is ignored", "scrape", "decode_page", "negate the condition", "if meta:", PAGES),
     D("scrape: a meta tag may declare UTF-16", "scrape", "_codec", "negate the condition", "if from_meta and", PAGES),
     D("scrape: a latin-1 page with an undefined windows-1252 byte is refused", "scrape", "decode_page", "negate the condition", "if codec in _LATIN_ONE:", PAGES),
+    # ---- a next link that is not a page is the end of the walk ------------------------------------------------------------------------------
+    D("scrape: an empty, # or javascript: next link is followed", "scrape", "_next_url", "negate the condition", "if not href", PAGES),
+    D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if target ==', PAGES),
+    D("scrape: a next link marked disabled is followed", "scrape", "_says_disabled", "and <-> or", 'any("disabled"', PAGES),
 ]
 
 
