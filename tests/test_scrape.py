@@ -191,11 +191,14 @@ def test_every_hidden_field_of_the_form_is_posted_not_only_the_one_the_config_na
 
 def test_a_login_the_site_does_not_accept_is_not_taken_for_one(sites):
     for knobs, changes in (
-        ({"redirect_on_bad_login": True}, {"environ": {"SHOP_USER": USER, "SHOP_PASS": "wrong one 1"}}),  # sent back to the form
-        ({}, {"session_cookie": "never-set"}),  # redirected on, but the cookie the config expects is not there
+        # sent back to the form, and with no session cookie named in the config that is the only thing that says no
+        ({"redirect_on_bad_login": True}, {"environ": {"SHOP_USER": USER, "SHOP_PASS": "wrong one 1"}, "session_cookie": ""}),
+        ({}, {"session_cookie": "never-set"}),  # redirected on as if it worked, but the cookie the config expects is not there
     ):
-        out = read(make_adapter(sites(**knobs), **changes))
+        site = sites(**knobs)
+        out = read(make_adapter(site, **changes))
         assert [g.message.split(":")[0] for g in gaps(out)] == ["E_LOGIN_FAILED"] and rows(out) == []
+        assert site.log[-1]["method"] == "POST"  # it stopped at the answer to the post: no page was asked for on a login that failed
 
 
 def test_a_site_that_accepts_the_login_and_never_a_session_ends_the_run_after_one_login(sites):

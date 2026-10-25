@@ -108,10 +108,8 @@ def search_legs(q: str, brand: str = "") -> list[dict]:
         for form_brand, value in query["forms"]:
             add("number", value, form_brand)
         return legs
-    words = query_words(query["value"])
-    if not words:
-        return []
-    add("text", " ".join(words), "")
+    # a text query has a word: interpret_query turned every query without one into "empty" above
+    add("text", " ".join(query_words(query["value"])), "")
     return legs
 
 
