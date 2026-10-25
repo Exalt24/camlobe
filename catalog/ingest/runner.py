@@ -77,6 +77,7 @@ def _ingest_locked(supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, b
 
     for item in adapter.records(start_after=start):
         if isinstance(item, SourceGap):
+            flush()  # what was read before the gap is whole, so it moves the checkpoint
             contiguous = False
             gap_seen = True
             batch.had_gap = True

@@ -1,0 +1,52 @@
+"""A paginated JSON REST source: GET <url>?offset=N&limit=M answering {"items": [...], "total": N}."""
+from __future__ import annotations
+
+import requests
+
+from .paged import FatalError, PagedAdapter, PermanentError, TransientError
+
+
+def _retry_after(response: requests.Response) -> float | None:
+    value = response.headers.get("Retry-After")
+    try:
+        return max(0.0, float(value)) if value is not None else None
+    except ValueError:  # an HTTP date: not worth parsing, fall back to the backoff
+        return None
+
+
+class RestAdapter(PagedAdapter):
+    def __init__(self, url: str, token: str | None = None, timeout: tuple[float, float] = (5.0, 20.0), session=None, **kwargs):
+        # the URL is the source identity and is stored with the run, so it must never carry a secret
+        if "?" in url or "@" in url.split("//", 1)[-1].split("/", 1)[0]:
+            raise ValueError("pass credentials as a token, not inside the URL")
+        super().__init__(source_ref=url, **kwargs)
+        self.url = url
+        self.timeout = timeout
+        self.session = session or requests.Session()
+        self.headers = {"Accept": "application/json"}
+        if token:
+            self.headers["Authorization"] = f"Bearer {token}"
+
+    def fetch_page(self, offset: int, limit: int):
+        try:
+            response = self.session.get(
+                self.url, params={"offset": offset, "limit": limit}, headers=self.headers, timeout=self.timeout
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            raise TransientError(f"{type(exc).__name__}") from exc
+        status = response.status_code
+        if status in (401, 403):
+            raise FatalError(f"HTTP {status}: the source refused our credentials")
+        if status == 429 or status >= 500:
+            raise TransientError(f"HTTP {status}", retry_after=_retry_after(response))
+        if status >= 400:
+            raise PermanentError(f"HTTP {status}")
+        try:
+            body = response.json()
+            items = body["items"]
+            total = body.get("total")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PermanentError("the answer was not the expected JSON") from exc
+        if not isinstance(items, list) or (total is not None and not isinstance(total, int)):
+            raise PermanentError("the answer was not the expected JSON")
+        return items, total
