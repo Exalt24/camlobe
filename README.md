@@ -86,17 +86,17 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 597 tests, needs Postgres on 5434 and Meilisearch on 7701
-python tools/mutation_check.py             # 234 guards, edits source in place: run it in a copy (--help)
+python -m pytest tests/ -o addopts=""      # 686 tests, needs Postgres on 5434 and Meilisearch on 7701
+python tools/mutation_check.py             # 258 guards, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and CI starts both.
 
-- 597 tests, all passing in a run on 2026-10-26 after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)); 442 passed earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
+- 686 tests, all passing in a run on 2026-10-26 after the scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)); 597 passed after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
 - Every rule has a test in both directions: the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures in every stage, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness: 148 guards. On 2026-10-25 all 144 then in the harness were killed, of which one was a hang that hit its time limit and 143 a failing test ([output](docs/test-runs/2026-10-25-mutation.txt)). The run was made in a copy of the repository in four parts. The harness reported ten survivors in its first passes. Each ended as a new test or assertion, the removal of a redundant guard, or a fix to the harness itself. On 2026-10-26, after the two fixes, the 4 new guards and 9 touched ones were run in a copy and all 13 were killed ([output](docs/test-runs/2026-10-26-mutation-partial.txt)). After the second review all 234 guards were run in a copy, in three parts, and 234 were killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)). Two survivors showed up on the way: a login test too weak to tell one guard from another, which was strengthened, and a guard on a branch that could never run, which was removed with the branch.
+- Mutation harness: 148 guards. On 2026-10-25 all 144 then in the harness were killed, of which one was a hang that hit its time limit and 143 a failing test ([output](docs/test-runs/2026-10-25-mutation.txt)). The run was made in a copy of the repository in four parts. The harness reported ten survivors in its first passes. Each ended as a new test or assertion, the removal of a redundant guard, or a fix to the harness itself. On 2026-10-26, after the two fixes, the 4 new guards and 9 touched ones were run in a copy and all 13 were killed ([output](docs/test-runs/2026-10-26-mutation-partial.txt)). After the second review all 234 guards were run in a copy, in three parts, and 234 were killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)). Two survivors showed up on the way: a login test too weak to tell one guard from another, which was strengthened, and a guard on a branch that could never run, which was removed with the branch. The scraper output round added 24 guards (258 in all) whose edits are derived from the syntax tree by `mutate_ast.py`, not matched as text; after the fixes those 24 and the other 91 guards of the files that changed were run in a copy, and 115 of 115 were killed ([output](docs/test-runs/2026-10-26-mutation-output-round.txt)). The first run of one of them survived (the log record filter), because no test made a request whose URL held a secret, and a test was added.
 
 ## Register: what ran and what did not
 
@@ -114,9 +114,10 @@ The database tests use the compose Postgres and create their own `test_camlobe` 
 
 ## Limits
 
-- **HTTP scraping is built, and was only ever run against a local fake site.** It has never met a real site, a real proxy service, a real CAPTCHA or a web firewall, and a real site's login, markup and limits will differ. It checks robots.txt, spaces its requests, honours Retry-After and stops on a block or a challenge without trying to get past it, but none of that is permission: use it only on a site whose owner has allowed it, with its terms read ([feeds](docs/feeds.md#scraping-a-site)).
+- **HTTP scraping is built, and was only ever run against a local fake site.** It has never met a real site, a real proxy service, a real CAPTCHA or a web firewall, and a real site's login, markup and limits will differ. It checks robots.txt, spaces its requests, honours Retry-After and stops on a block or a challenge without trying to get past it, and a page the site cut short, an empty table or a body shorter than announced ends the run as partial and never as a success, but none of that is permission: use it only on a site whose owner has allowed it, with its terms read ([feeds](docs/feeds.md#scraping-a-site)).
 - A delisting rests on one snapshot per supplier: a supplier that sends two full feeds at once (brakes in one file, filters in another) must not be flagged, and a feed that is truncated but reads cleanly is only caught when it would delist more than half the listings.
-- A page repeated whole by a paged source is detected, pages that overlap are not.
+- A page repeated whole by a paged source is detected, pages that overlap are not. A resumed REST or SOAP run starts at the page of its checkpoint, so it needs the API to keep its order between two runs (the scraper never resumes by position): [feeds](docs/feeds.md#paged-sources).
+- A secret in a URL parameter whose name does not say so (`?k=...`) stays in the stored source name, because hiding every query value would merge two sources into one checkpoint; it is taken out of every message ([feeds](docs/feeds.md#secrets)).
 - Search on the database backend does not fold accents and Meilisearch does.
 - **Known limit, not fixed:** if an index rebuild crashes between the swap and the deletion of the staging index and is then resumed, the old index can be put back live, and the sync cannot repair it (it only sends parts whose version is behind). The cure is `rebuild_search_index --restart`.
 - Fitment is a small invented table in ACES style (year, make, model, submodel, engine, position). It is not the VCdb.

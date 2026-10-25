@@ -10,15 +10,22 @@ What it does, in the order a run does it:
      with the site's Crawl-delay raised into the pause if it is longer than the configured one. A robots.txt that
      cannot be read because the server failed (5xx) is read as "everything disallowed", as RFC 9309 says.
   2. A login form is read for its hidden fields (the CSRF token among them), filled with the credentials and posted.
-     The credentials are read from the environment variables the config NAMES, in the constructor, and kept in two
-     private attributes: no message, note, run record or exception holds them.
+     The credentials are read from the environment variables the config NAMES, in the constructor, and kept in private
+     attributes. The adapter names them (`secret_values`) and the runner takes them out of every message, note, run record
+     and log record before it is stored, because an exception's text (requests quotes a whole proxy URL) is not ours.
   3. The session cookie jar can be saved to a file and loaded on the next run, so a valid session is reused. A
      session that expires mid run is logged in again ONCE; a second expiry ends the run.
   4. Requests are spaced by a pause, a 429 is waited out as its Retry-After says (a wait longer than the cap is not
      waited, the run stops), a 5xx or a timeout is retried with backoff, and with several proxies a proxy that
      refuses the connection is skipped for the next one.
-  5. Pages are followed by their `next` link, on the same site only, never twice, up to a page limit.
+  5. Pages are followed by their `next` link, on the same site only, never twice, up to a page limit. A next link that
+     is not a page (`#`, empty, `javascript:`, marked disabled, the page itself) means there is none.
   6. The product table of each page becomes records keyed by its header text, which the usual header mapping reads.
+
+The walk ends as a success only when the SITE said it ended: every page was read whole (its table and html closed, its
+body as long as announced, its bytes decodable with the charset it declares) and the first page had rows. Anything else is
+a coded gap, so the run is partial: it delists nothing and never completes the checkpoint. A run never resumes by row
+position (the order of a site changes), it walks again from the first page.
 
 A page that is not data is never parsed as data: HTTP 403, a 429 that will not clear, a robots.txt refusal, a 200 page
 carrying a bot challenge marker outside the product table, a page with no product table. Each ends the run as a
