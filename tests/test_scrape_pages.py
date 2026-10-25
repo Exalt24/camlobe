@@ -893,3 +893,72 @@ def test_a_rel_value_matches_the_next_link_by_its_tokens_and_ignoring_case(rel, 
 def test_the_default_next_selector_still_matches_a_plain_rel_next_and_a_configured_one_is_used_as_written():
     assert len(rows(records(adapter_for(rel_site("next"))))) == 2
     assert len(rows(records(adapter_for(rel_site("nofollow next"), next_selector="a[rel=next]")))) == 1  # exactly what the config says
+
+
+# ---- F8: a page that has the product table is a data page, whatever else is on it ---------------------------------------------
+
+
+SIGN_IN_BOX = '<header><form action="/account/login" method="post" class="mini-login"><input name="email"><input type="password" name="pass"><button>Dealer sign in</button></form></header>'
+
+
+class MethodSession(PageSession):
+    """A PageSession whose route also sees the method and the form: route(method, url, data) -> (status, headers, body)."""
+
+    def request(self, method, url, **kwargs):
+        self.log.append((method, url))
+        status, headers, body = self.route(method, url, kwargs.get("data"))
+        response = requests.Response()
+        response.status_code, response.url = status, url
+        response._content = body.encode() if isinstance(body, str) else body
+        response.headers.update(headers)
+        response.encoding = "utf-8"
+        return response
+
+
+def with_box(html):
+    return html.replace("<body>", "<body>" + SIGN_IN_BOX, 1)
+
+
+@pytest.mark.parametrize("login_configured", [False, True])
+def test_a_sign_in_box_in_the_header_of_an_open_catalog_does_not_make_it_a_login_wall(login_configured):
+    def route(url):
+        return 200, {}, with_box(products_table([part(1), part(2)]))
+
+    extra = dict(login_url=f"{BASE}/login", username_env="U", password_env="P") if login_configured else {}
+    clock = Clock()
+    cfg = ScrapeConfig(start_url=f"{BASE}/catalog?page=1", delay_seconds=0.0, respect_robots=False, **extra)
+    adapter = ScrapeAdapter(cfg, session=PageSession(route), environ={"U": "buyer", "P": "pw"}, sleep=clock.sleep, clock=clock.time)
+    out = records(adapter)
+    assert codes(out) == [] and len(rows(out)) == 2 and adapter.notes()["logins"] == 0
+
+
+def test_a_password_field_and_no_product_table_is_still_a_login_wall():
+    page = "<html><body><form action=\"/login\"><input type=\"password\" name=\"pw\"></form></body></html>"
+    assert codes(records(adapter_for(lambda url: (200, {}, page)))) == ["E_LOGIN_REQUIRED"]
+
+
+def test_an_expired_session_page_with_a_password_field_and_no_table_is_logged_in_again_even_when_the_site_shows_a_box_elsewhere():
+    login_page = '<html><body><form action="/login" method="post"><input type="hidden" name="csrf_token" value="t"><input name="username"><input type="password" name="password"></form></body></html>'
+    state = {"in": False, "gets": 0}
+
+    def route(method, url, data):
+        if url.endswith("/login") and method == "GET":
+            return 200, {}, login_page
+        if url.endswith("/login") and method == "POST":
+            state["in"] = True
+            return 200, {}, with_box(products_table([part(1)], nxt='<a rel="next" href="/catalog?page=2">Next</a>'))  # lands on page 1 with the box
+        if "page=2" in url and state["gets"] == 0:
+            state["gets"] += 1
+            state["in"] = False
+            return 200, {}, login_page  # the session died: page 2 is the login form
+        if not state["in"]:
+            return 200, {}, login_page
+        page = int(url.rsplit("page=", 1)[1])
+        return 200, {}, with_box(products_table([part(page)], nxt='<a rel="next" href="/catalog?page=2">Next</a>' if page == 1 else ""))
+
+    clock = Clock()
+    cfg = ScrapeConfig(start_url=f"{BASE}/catalog?page=1", login_url=f"{BASE}/login", username_env="U", password_env="P", delay_seconds=0.0, respect_robots=False)
+    adapter = ScrapeAdapter(cfg, session=MethodSession(route), environ={"U": "buyer", "P": "pw"}, sleep=clock.sleep, clock=clock.time)
+    out = records(adapter)
+    assert codes(out) == [] and [r.fields["Part No"] for r in rows(out)] == [part(1)[0], part(2)[0]]
+    assert adapter.notes()["logins"] == 2 and adapter.notes()["relogins"] == 1

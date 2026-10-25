@@ -401,7 +401,7 @@ MUTANTS: list[Mutant] = [
     M("scrape: a login that sends us back to the form is a success", "scrape", 'refused = self._is_login(urljoin(action, posted.headers.get("Location", "")))', "refused = False", SCRAPE),
     M("scrape: any number of re-logins", "scrape", "if self._relogins >= 1:", "if self._relogins >= 99:", SCRAPE),
     M("scrape: the first login may repeat for ever", "scrape", "            if self._initial_login_done:\n", "            if False:\n", SCRAPE, timeout=60),
-    M("scrape: an expired page is read as data", "scrape", '        if soup.select_one("input[type=password]") is not None:\n            raise _SessionExpired()', '        if False:\n            raise _SessionExpired()', SCRAPE),
+    D("scrape: an expired page is read as data", "scrape", "_read_page", "negate the condition", "self._has_password_field(soup)", SCRAPE),
     M("scrape: a 401 is only an error", "scrape", "if response.status_code == 401 and not login_page:", "if False:", SCRAPE),
     M("scrape: the login page is not checked for a challenge", "scrape", "        self._refuse_a_challenge(soup)\n        password_input =", "        password_input =", SCRAPE),
     M("scrape: the answer to the login post is not checked for a challenge", "scrape", "            self._refuse_a_challenge(after)\n", "", SCRAPE),
@@ -483,6 +483,9 @@ MUTANTS: list[Mutant] = [
     D("scrape: a body cell with colspan fills no more cells", "scrape", "_table", "Sub -> Add", "cells.extend", PAGES),
     D("scrape: a second row of the thead is data", "scrape", "_table", "NotEq -> Eq", 'tr.parent.name != "thead"', PAGES),
     D("scrape: the header is the first row of the table, not of the thead", "scrape", "_table", "Eq -> NotEq", 'tr.parent.name == "thead"', PAGES),
+    # F8: a page that has the product table is a data page, a password field or not
+    D("scrape: a sign in box on a data page makes it a login wall", "scrape", "_read_page", "and <-> or", "self._has_password_field(soup)", PAGES),
+    D("scrape: the answer to a login that shows the table and a sign in box is a refusal", "scrape", "_login", "and <-> or", "self._has_password_field(after)", PAGES),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
 ]

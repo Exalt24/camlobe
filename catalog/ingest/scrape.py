@@ -517,12 +517,17 @@ class ScrapeAdapter:
         soup = BeautifulSoup(text, PARSER)
         table = soup.select_one(self.cfg.table_selector)
         self._refuse_a_challenge(soup, table)
-        if soup.select_one("input[type=password]") is not None:
+        if table is None and self._has_password_field(soup):  # a login wall: a password field and nothing to read
             raise _SessionExpired()
         if table is None:
             raise _Stop("E_UNEXPECTED_PAGE", "the page has no product table")
         table_closed, html_closed = _scan(text)
         return _Page(url, soup, table, table_closed, html_closed)
+
+    @staticmethod
+    def _has_password_field(soup: BeautifulSoup) -> bool:
+        """A page that HAS the product table is a data page: a sign in box in its header is not a login wall."""
+        return soup.select_one("input[type=password]") is not None
 
     def _refuse_a_challenge(self, soup: BeautifulSoup, table=None) -> None:
         """A challenge is looked for everywhere EXCEPT the product table: a product called "Captcha reader" is a product."""
@@ -557,7 +562,7 @@ class ScrapeAdapter:
         elif posted.status_code == 200:
             after = BeautifulSoup(self._decode(posted), PARSER)
             self._refuse_a_challenge(after)
-            refused = after.select_one("input[type=password]") is not None
+            refused = after.select_one(self.cfg.table_selector) is None and self._has_password_field(after)
         if not refused and self.cfg.session_cookie and not any(c.name == self.cfg.session_cookie for c in self.session.cookies):
             refused = True
         if refused:
