@@ -1,6 +1,6 @@
 Django>=5.2,<5.3
 djangorestframework>=3.18.3,<3.19
-psycopg[binary]>=3.2,<4
+psycopg[binary]>=3.3.6,<4
 paramiko>=3.5,<5
 zeep>=4.3,<5
 requests[socks]>=2.32,<3
