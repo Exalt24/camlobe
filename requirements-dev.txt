@@ -1,4 +1,4 @@
 -r requirements.txt
 pytest>=9.1.1,<10
 pytest-django>=4.9,<5
-hypothesis>=6.120,<7
+hypothesis>=6.170.2,<7
