@@ -39,7 +39,7 @@ flowchart LR
 
 | Stage | Command | What is guaranteed |
 |---|---|---|
-| Ingest | `ingest_feed` | the raw row is stored as received and never changed (a trigger refuses row UPDATE and DELETE for ordinary roles); a second run over the same source changes nothing; a killed run resumes at its checkpoint; for a supplier flagged as sending its whole catalog, a part missing from a complete run is delisted ([feeds](docs/feeds.md#full-snapshots-and-delisting)) |
+| Ingest | `ingest_feed` | the raw row is stored as received and never changed (a trigger refuses row UPDATE and DELETE for ordinary roles); a second run over the same source changes nothing in the catalog (a repeated listing of one part adds one rejected row per run); a killed run resumes at its checkpoint; for a supplier flagged as sending its whole catalog, a part missing from a complete run is delisted ([feeds](docs/feeds.md#full-snapshots-and-delisting)) |
 | Normalise | `normalize_parts` | one canonical number per row, with the rules that fired recorded ([rules](docs/normalization.md)) |
 | Match | `match_parts` | the same brand and number across suppliers is one part; a row with no brand or with a conflicting barcode goes to a review queue instead of being merged ([rule](docs/matching.md)) |
 | Index | `rebuild_search_index`, `sync_search_index` | the rebuild resumes and swaps in at the end; the sync sends only parts that changed |
@@ -86,13 +86,13 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 955 tests, about 7 minutes, needs Postgres on 5434 and Meilisearch on 7701
+python -m pytest tests/ -o addopts=""      # 1,023 tests, about 8 minutes, needs Postgres on 5434 and Meilisearch on 7701
 python tools/mutation_check.py             # 296 guards, about 30 minutes, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and the CI workflow starts both (it has not run yet: see the register).
 
-- 955 tests: 954 passed on 2026-10-26 after the second scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)) and again in a run by someone else ([output](docs/test-runs/2026-10-26-pytest-lead-run.txt)), then one test was added that pins a proxy password with an at sign. Earlier counts: 686, 597, 442 and 435 ([outputs](docs/test-runs/)).
+- 1,023 tests, all passed in a full run by someone else on 2026-10-26 after the third scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-third-round.txt)); that round's six scripts replay as intended ([output](docs/test-runs/2026-10-26-third-pass-replay.txt)). Earlier counts: 954, 686, 597, 442 and 435 ([outputs](docs/test-runs/)).
 - The part number, matching and mapping rules have tests for the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.

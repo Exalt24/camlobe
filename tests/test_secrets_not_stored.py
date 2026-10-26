@@ -313,6 +313,22 @@ def test_a_secret_cut_at_any_url_delimiter_is_removed_piece_by_piece_from_any_te
         assert piece not in out
 
 
+def test_a_password_half_that_holds_a_percent_form_is_removed_whole_when_a_library_cuts_at_the_backslash():
+    """Found by a random search on 2026-10-26 (it fails the same way on the commit before): `%000;` was split at its own `%00`, so the half a library shows was never a piece."""
+    password = "%000;" + BACKSLASH + ";000%k9x2"
+    out = Redactor([password]).text(f"boom %000; | ;000%k9x2 | {password} end")
+    assert "000;" not in out.replace(REDACTED, "") and "k9x2" not in out
+    plain = Redactor(["abcd" + BACKSLASH + "wxyz"]).text("boom abcd | wxyz end")  # CONTROL: an ordinary cut half is still removed
+    assert "abcd" not in plain and "wxyz" not in plain
+
+
+def test_a_secret_that_decodes_to_whitespace_does_not_turn_every_space_of_a_message_into_a_placeholder():
+    """Found the same way: `+` is a space in a form encoded string, and a form of only whitespace matched every gap between two words."""
+    message = "InvalidURL: Failed to parse: 'http://127.0.0.1:99999' is not a valid host or port"
+    assert Redactor(["+", "http://camuser:+@127.0.0.1:3128"]).text(message) == message
+    assert Redactor(["pass+word"]).text("the pass+word failed") == f"the {REDACTED} failed"  # CONTROL: a real secret that holds a plus is still removed
+
+
 ORDINARY_ERRORS = [
     "InvalidURL: Failed to parse: 'http://127.0.0.1:99999' is not a valid host or port",
     "ConnectionError", "ReadTimeout", "ChunkedEncodingError", "HTTP 500", "HTTP 429 on every one of 4 attempts",

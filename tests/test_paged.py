@@ -191,6 +191,8 @@ def test_gaps_name_exactly_the_positions_that_are_missing(n, page, bad_pages):
     missing = set()
     for g in (r for r in out if isinstance(r, SourceGap)):
         missing |= set(range(g.first_position, g.last_position + 1))
+    # a first page that fails leaves the total unknown, so its gap runs to the end of the page even when the source holds fewer rows: it may name positions past n, never miss one
+    missing = {p for p in missing if p <= n}
     assert seen | missing == set(range(1, n + 1)) and not (seen & missing)
 
 

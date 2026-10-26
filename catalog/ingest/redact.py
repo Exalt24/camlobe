@@ -42,20 +42,26 @@ def secret_name(name: str) -> bool:
 
 
 MIN_PIECE = 4  # a piece of a secret shorter than this is not taken out of text: it would turn ordinary words into placeholders
-_DELIMITERS = re.compile(r"[\\/?#@:]|%[0-9A-Fa-f]{2}|%")  # where a URL parser cuts: the backslash, slash, ? # @ :, and a percent form
+_HARD_DELIMITERS = re.compile(r"[\\/?#@:]")  # where a URL parser cuts: the backslash, slash, ? # @ :
+_DELIMITERS = re.compile(r"[\\/?#@:]|%[0-9A-Fa-f]{2}|%")  # the same, and a percent form
 
 
 def _pieces(form: str) -> set[str]:
     """The parts of a secret a library may show on their own. `requests` and urllib3 split a proxy URL at its delimiters, so a
     password such as `Zq9pass<backslash>word77` is cut at the backslash and the first half is quoted in the error ('...:Zq9pass'
     is not a valid host or port) with the rest gone. Each part of 4 characters or more is a secret too."""
-    return {piece for piece in _DELIMITERS.split(form) if len(piece) >= MIN_PIECE}
+    parts = set(_DELIMITERS.split(form))
+    if re.search(r"%[0-9A-Fa-f]{2}", form):  # a half cut at a hard delimiter may hold a percent form (a password with `%000;`): keep that half whole too
+        parts |= set(_HARD_DELIMITERS.split(form))
+    return {piece for piece in parts if len(piece) >= MIN_PIECE}
 
 
 def _forms(secret: str) -> set[str]:
     """The ways a message may show `secret`: as it is, percent encoded, form encoded, and as the inside of a repr."""
     out = {secret, quote(secret, safe=""), quote_plus(secret), unquote(secret), unquote_plus(secret), repr(secret)[1:-1]}
-    out = {form for form in out if form}
+    for form in list(out):
+        if not form.strip():  # a form that is only whitespace (`+` decoded) would turn every space of a message into a placeholder
+            out.discard(form)
     if "://" in secret:  # a URL is removed whole: its host and scheme are no secret, and nor are the pieces of its encoded form
         return out
     return out | {piece for form in out for piece in _pieces(form)}

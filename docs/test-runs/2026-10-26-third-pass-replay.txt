@@ -1,0 +1,47 @@
+Third blind pass: the adversary's six scripts replayed by the lead against the fixed code on 2026-10-26 (a fresh throwaway database each time). Expected output is the adversary's claim; known limit: a cut inside the last cell with every column present is stored.
+
+== t_rest.py
+[rest_price_returns_within_partial_pass] expect='current R5 price 1000 after run 3 (doc: A to B and back to A stores three versions)'
+   actual={'runs': [('10.00', PipelineRun.Status.PARTIAL, 4, 0, 1000), ('12.00', PipelineRun.Status.PARTIAL, 1, 1, 1200), ('10.00', PipelineRun.Status.PARTIAL, 1, 1, 1000)], 'versions': [('R5', 'ACME', 1000, ''), ('R5', 'ACME', 1200, ''), ('R5', 'ACME', 1000, '')]}
+day4 succeeded 2 2 1000
+day5 succeeded 0 6 1000
+
+== t_rest2.py
+[rest_part_withdrawn_mid_walk] expect='only RX1001 delisted; the run not a clean success that skips RX1004'
+   actual={'status': PipelineRun.Status.PARTIAL, 'notes_snapshot': None, 'delisted': [], 'rows_read': 23}
+
+== t_file.py
+[csv_duplicate_cost_header] expect='refused like SKU+MPN (two headers for one required field)'
+   actual={'status': PipelineRun.Status.FAILED, 'errors': [{'where': 'ingest', 'message': "SchemaDriftError: more than one column maps to the same field: {'cost': ['Cost', 'Cost [duplicate 2]']}"}], 'raws': []}
+[csv_alias_cost_twice_control] expect='refused'
+   actual={'status': PipelineRun.Status.FAILED, 'errors': [{'where': 'ingest', 'message': "SchemaDriftError: more than one column maps to the same field: {'cost': ['Cost', 'Unit Cost']}"}]}
+[csv_cut_mid_last_field] expect='the cut row rejected or the run not a clean success; P3 should not be stored at $1.00'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'rejected': 0, 'raws': [('P1', 'ACME', 2000, 'Pad'), ('P2', 'ACME', 4000, 'Rotor'), ('P3', 'ACME', 100, 'Caliper')]}
+[csv_cut_inside_quotes] expect='rejected row or partial'
+   actual={'status': PipelineRun.Status.PARTIAL, 'raws': [('P1', 'ACME', 2000, 'Pad, front')]}
+after full file: succeeded [('P1', 'ACME', 2000, 'Pad, front'), ('P1', 'ACME', 2000, 'Pad'), ('P2', 'ACME', 4000, 'Rotor'), ('P3', 'ACME', 12345, 'Caliper')]
+
+== t_xml.py
+[xml_mixed_content_description] expect='the whole text of the element (or the row refused)'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'raws': [('X1', 'ACME', 2000, 'Brake pad set front axle, ceramic'), ('X2', 'ACME', 3000, 'Rotor vented 300 mm'), ('X3', 'ACME', 4500, 'Caliper')], 'rejected': []}
+
+== t_scrape.py
+[scrape_group_heading_td_colspan] expect='2 parts stored; the heading is not a part'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'raws': [('P1', 'ACME', 2000, 'Pad'), ('P2', 'ACME', 4000, 'Rotor')], 'rejected': 0}
+[scrape_tfoot_no_tbody] expect='2 parts; the footer is not a part'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'raws': [('P1', 'ACME', 2000, 'Pad'), ('P2', 'ACME', 4000, 'Rotor')], 'rejected': 0}
+[scrape_price_cell_shapes] expect='N1 1250, N2 123450 (the doc accepts space-grouped thousands)'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'stored': [('N1', 'ACME', 1250, 'x'), ('N2', 'ACME', 123450, 'x'), ('N3', 'ACME', 1250, 'x'), ('N4', 'ACME', 1250, 'x'), ('N5', 'ACME', 1250, 'x'), ('N6', 'ACME', 1250, 'x')], 'rejected': []}
+[scrape_same_part_twice_daily] expect='a second run over the same source changes nothing'
+   actual={'runs': [(PipelineRun.Status.SUCCEEDED, 1, 0), (PipelineRun.Status.SUCCEEDED, 0, 1), (PipelineRun.Status.SUCCEEDED, 0, 1)], 'versions': 1}
+[scrape_duplicate_price_header] expect='refused (two headers for one required field)'
+   actual={'status': PipelineRun.Status.FAILED, 'raws': [], 'errors': [{'where': 'ingest', 'message': "SchemaDriftError: more than one column maps to the same field: {'cost': ['Price', 'Price [duplicate 2]']}"}]}
+[scrape_hidden_template_row] expect='not a part'
+   actual={'status': PipelineRun.Status.SUCCEEDED, 'raws': [('P1', 'ACME', 2000, 'Pad'), ('P2', 'ACME', 4000, 'Rotor')], 'rej': [('{{sku}} | {{brand}} | {{desc}} | {{price}}', 'bad_cost')]}
+
+== t_flow.py
+review models ['ReviewItem']
+parts []
+review 0 []
+[scrape_same_part_twice_downstream] expect='search_version stable after day 1'
+   actual={'per_day': [(1, [(500, None)]), (1, [(500, None)]), (1, [(500, None)])]}
