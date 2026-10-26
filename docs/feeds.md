@@ -56,6 +56,8 @@ When the total is unknown (the server sends none), a short page proves nothing, 
 
 A REST answer is parsed from its bytes as JSON (UTF-8, RFC 8259), whatever its Content-Type says: `requests` would read a `text/plain` or `text/json` answer with no charset as ISO-8859-1 and store every accent as mojibake.
 
+**Known limit, not fixed:** the timeout of a request bounds each socket read, not the whole body, so a server that sends one byte every few seconds keeps a request open for as long as it trickles (a page of 15 seconds against a 1 second timeout was read). It takes a broken or hostile server, and a total deadline would also cut a slow but honest download.
+
 ## Full snapshots and delisting
 
 A supplier whose feed lists everything it offers is flagged once with `ingest_feed <supplier> --snapshot ...` (and unflagged with `--incremental`). While flagged, each batch also records which supplier parts the pass read, including rows that did not change (they store no raw row, so nothing else says they are still listed). When a pass over the source finishes and the run is `succeeded`, every listing of that supplier that the pass did not read gets `delisted_at`, and a delisted listing that the pass reads again is relisted. The supplier's snapshot is its latest completed pass over any of its sources, and a pass that has not finished never replaces it: what a pass reads is kept apart (`staging`) and swaps in, with the completion time, only when the run completes, so one partial run of a restarted source leaves the last completed pass as it was and delists nothing, so a feed that arrives under a new file name every day works, and a supplier that sends two feeds at the same time (brakes in one file, filters in the other) must not be flagged.
