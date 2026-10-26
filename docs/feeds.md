@@ -36,7 +36,7 @@ The identity of a source (`source_ref`, and with it the checkpoint) hides the va
 
 ## Restart and re-run
 
-- Each batch of 1000 rows is one transaction holding its rows, its rejected rows, the run counters and the checkpoint.
+- Each batch (1000 rows by default, `--batch-size`) is one transaction holding its rows, its rejected rows, the run counters and the checkpoint.
 - A source is skipped when its content hash equals the last complete run's, and a skipped run delists nothing. A file with the same name and new content is read from the start, and only the rows that changed are stored.
 - A row is stored when its content differs from the newest stored version of the same supplier part number. A price that goes from A to B and back to A stores three versions, so the current price is the last one.
 - Each source row also has an idempotency key (supplier, source, position, content hash, and the PASS: the id of the run that began it) with a unique constraint, which is what stops rows after a gap landing twice when they are read again in the same pass. A new file version and every restarted walk of a live site begin a new pass, so run 3 does not find run 1's key for a price that returned to 10.00 and counts it unchanged while 12.00 is the newest version.
