@@ -96,6 +96,25 @@ def local_name(name: str) -> str:
     return name.rsplit("}", 1)[-1]
 
 
+def element_text(element) -> str:
+    """The whole text of an XML element, not the first text node only: `Rotor <b>vented</b> 300 mm` is `Rotor vented 300 mm`.
+    A `br` between two pieces of text is a break, so it reads as a space. An element with no child tags is its text, as before."""
+    if len(element) == 0:
+        return (element.text or "").strip()
+    parts: list[str] = []
+
+    def walk(node) -> None:
+        parts.append(node.text or "")
+        for child in node:
+            if local_name(child.tag if isinstance(child.tag, str) else "").lower() == "br":
+                parts.append(" ")
+            walk(child)
+            parts.append(child.tail or "")
+
+    walk(element)
+    return " ".join("".join(parts).split())
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -231,7 +250,7 @@ class FileAdapter:
                     fields: dict[str, str] = {local_name(a): v for a, v in element.attrib.items()}
                     for child in element:
                         name = local_name(child.tag)
-                        fields[name] = (child.text or "").strip()
+                        fields[name] = element_text(child)
                         for attr, value in child.attrib.items():
                             fields[f"{name}@{local_name(attr)}"] = value
                     yield SourceRecord(position, fields, local_name(element.tag or "")[:200])

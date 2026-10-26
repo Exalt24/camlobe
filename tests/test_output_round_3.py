@@ -568,3 +568,59 @@ def test_two_different_aliases_of_one_field_are_still_refused_and_a_plain_header
         resolve_headers(["PartNo", "Mfr", "Cost", "Unit Cost"])
     assert unique_headers(["a", "b", "a", "", "", "a"]) == ["a", "b", "a [duplicate 2]", "", "", "a [duplicate 3]"]
     assert resolve_headers(unique_headers(["PartNo", "Mfr", "Cost", ""])) == {"part_number": "PartNo", "brand": "Mfr", "cost": "Cost"}
+
+
+# ---- F5: an XML element that holds markup is read whole ---------------------------------------------------------------------------
+# Rule: the text of a field is all the text of its element: the pieces between and after inline tags (b, span, i, em), with a `br`
+# read as a space. An element with no child tags is its text, exactly as before. This holds for every field read from XML.
+
+WORDS = st.sampled_from(["Brake", "pad", "set", "front", "axle,", "ceramic", "Rotor", "vented", "300", "mm"])
+INLINE = st.sampled_from(["b", "span", "i", "em"])
+
+
+def markup():
+    """(xml source, the text a reader sees) for a tree of words, inline tags and breaks."""
+    leaf = WORDS.map(lambda w: (w, w))
+    br = st.just(("<br/>", " "))
+
+    def tagged(children):
+        return st.tuples(INLINE, st.lists(children, min_size=1, max_size=3)).map(
+            lambda t: (f"<{t[0]}>" + "".join(s for s, _ in t[1]) + f"</{t[0]}>", "".join(v for _, v in t[1]))
+        )
+
+    node = st.recursive(st.one_of(leaf, br), tagged, max_leaves=6)
+    return st.lists(st.tuples(node, st.sampled_from(["", " "])), min_size=1, max_size=5).map(
+        lambda items: ("".join(s + gap for (s, _), gap in items), "".join(v + gap for (_, v), gap in items))
+    )
+
+
+@given(description=markup(), brand=markup())
+@hyp_settings(max_examples=60, deadline=None)
+def test_every_field_read_from_xml_is_the_whole_text_of_its_element(description, brand, tmp_path_factory):
+    path = tmp_path_factory.mktemp("o3xml") / "feed.xml"
+    path.write_text(
+        f"<catalog><item><sku>XM1001</sku><manufacturer>{brand[0]}</manufacturer><description>{description[0]}</description>"
+        "<price>5.00</price></item></catalog>",
+        encoding="utf-8",
+    )
+    supplier = fresh_supplier()
+    run = ingest(supplier, FileAdapter(path))
+    raw = RawPart.objects.get(supplier=supplier)
+    assert " ".join(description[1].split()) == raw.description_raw
+    assert " ".join(brand[1].split()) == raw.brand_raw and run.status == PipelineRun.Status.SUCCEEDED
+
+
+def test_xml_the_adversarys_descriptions_and_the_plain_element_that_must_not_change(tmp_path):
+    path = tmp_path / "mixed.xml"
+    path.write_text(
+        "<catalog>"
+        "<item><sku>XM1001</sku><manufacturer>Marlow</manufacturer><description>Brake pad set<br/>front axle, ceramic</description><price>20.00</price></item>"
+        "<item><sku>XM1002</sku><manufacturer>Marlow</manufacturer><description>Rotor <b>vented</b> 300 mm</description><price>30.00</price></item>"
+        "<item><sku>XM1003</sku><manufacturer>Marlow</manufacturer><description>  Caliper   left  </description><price>40.00</price></item>"
+        "</catalog>",
+        encoding="utf-8",
+    )
+    supplier = fresh_supplier()
+    ingest(supplier, FileAdapter(path))
+    got = dict(RawPart.objects.filter(supplier=supplier).values_list("part_number_raw", "description_raw"))
+    assert got == {"XM1001": "Brake pad set front axle, ceramic", "XM1002": "Rotor vented 300 mm", "XM1003": "Caliper   left"}

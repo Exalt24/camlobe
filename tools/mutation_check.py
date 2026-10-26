@@ -510,6 +510,11 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F5: the text of an XML field is the whole text of its element (the text after a child tag, a br as a space, a plain element as it was)
+    D("adapters: the text after a child tag of an XML field is dropped", "adapters", "element_text", "delete the call statement", "parts.append(child.tail", R3),
+    D("adapters: a br in an XML field is not a break", "adapters", "element_text", "Eq -> NotEq", '.lower() == "br"', R3),
+    D("adapters: a plain XML element is read like a marked up one", "adapters", "element_text", "negate the condition", "if len(element) == 0:", R3),
+    D("adapters: the text of a child tag of an XML field is dropped", "adapters", "element_text", "delete the call statement", "walk(child)", R3),
     # F4: the same header text twice is two columns (refused for a required field, read by the rule for an optional one, listed when unmapped)
     D("mapping: the same header text twice is one column again", "mapping", "unique_headers", "Eq -> NotEq", "seen[name] == 1", R3),
     D("mapping: a second column with the same header text means nothing", "mapping", "resolve_headers", "negate the condition", "named.group(1)", R3),
