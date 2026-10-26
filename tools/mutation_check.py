@@ -457,7 +457,7 @@ MUTANTS: list[Mutant] = [
     # ---- the same class in the REST adapter: a JSON answer is read as bytes ------------------------------------------------------------------
     D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
     # ---- second output round (derived from the syntax tree) ----------------------------------------------------------------------------------
-    # F1: a row is unchanged only when it matches the NEWEST stored version; its key says "this row of THIS pass landed once"
+    # F1 (second round, reworked in the third): a row is unchanged only when it matches the NEWEST stored version; its key holds the run that wrote it
     D("mapping: a key does not tell one run from the next", "mapping", "idempotency_key", "negate the condition", "if run_id:", R3),
     # F2: a pass that has not finished never replaces the latest completed pass
     D("runner: a finished pass does not promote what it read", "runner", "_ingest_locked", "delete the call statement", ".update(staging=False)", DELIST),
