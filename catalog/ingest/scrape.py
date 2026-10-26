@@ -334,6 +334,7 @@ class ScrapeAdapter:
         self._jar: LWPCookieJar | None = None
         self._dead: set[int] = set()
         self._position = 0
+        self._skipped: dict[str, int] = {}  # rows left out because they are not parts, by reason (read back through notes())
         self._data_pages = 0
         self._initial_login_done = False
         self._relogins = 0
@@ -352,7 +353,7 @@ class ScrapeAdapter:
         return [secret for secret in self._secrets if secret]
 
     def notes(self) -> dict:
-        return dict(self._stats)
+        return {**self._stats, **({"skipped_rows": dict(self._skipped)} if self._skipped else {})}
 
     def cleanup(self) -> None:
         self._save_jar()
@@ -365,6 +366,7 @@ class ScrapeAdapter:
     def records(self, start_after: int = 0) -> Iterator[SourceRecord | SourceGap]:
         """Every row of the site from its first page. `start_after` is accepted for the interface and ignored (see `resumable`)."""
         self._position = 0
+        self._skipped = {}
         try:
             if self._proxy_problem:
                 raise _Stop("E_PROXY_URL", self._proxy_problem, fatal=True)
@@ -402,7 +404,7 @@ class ScrapeAdapter:
             soup = page.soup
             if not page.table_closed:  # nothing is read from a page the site did not finish: its last row may be cut
                 raise _Stop("E_PAGE_TRUNCATED", "the page ends inside its product table, so nothing is read from it")
-            header, rows = self._table(page.table)
+            header, rows = self._table(page.table, self._skipped)
             if not rows and not self.cfg.allow_empty:
                 first = pages == 1  # an empty FIRST page is a failed run; an empty later one is a gap
                 raise _Stop("E_PAGE_EMPTY", "the product table has no rows" + ("; allow_empty says a supplier may list nothing" if first else ""), fatal=first)
@@ -462,10 +464,12 @@ class ScrapeAdapter:
             return 1
 
     @staticmethod
-    def _table(table) -> tuple[list[str], list[list[str]]]:
+    def _table(table, skipped: dict | None = None) -> tuple[list[str], list[list[str]]]:
         """(the header, the rows) of the product table, read from ITS OWN rows (never a nested table's) and cells (a th in a body
         row is a cell like a td). A cell with colspan fills that many columns, in the header and in a row. The header is the
-        first row of the thead that has any text (a second one, a filter row, is skipped), else the first row of the table."""
+        first row of the thead that has any text (a second one, a filter row, is skipped), else the first row of the table.
+        Rows that are not parts are left out and COUNTED by reason in `skipped`: a row of the tfoot (a total, a "Showing 1 to 20"
+        line), a row of th cells only, and a group heading (one td that spans the whole width of the header)."""
         own = [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
         if not own:
             return [], []
@@ -476,13 +480,27 @@ class ScrapeAdapter:
             text = cell.get_text(" ", strip=True)
             header.extend([text, *[f"{text} ({n})" if text else "" for n in range(2, ScrapeAdapter._span(cell) + 1)]])
         header = unique_headers(header)  # the same header text twice is two columns, never one
+        skipped = {} if skipped is None else skipped
+
+        def skip(reason: str) -> None:
+            skipped[reason] = skipped.get(reason, 0) + 1
+
         body = [tr for tr in own if tr.parent.name == "tbody"] or [tr for tr in own if tr is not header_tr and tr.parent.name != "thead"]
         rows = []
+        for tr in [tr for tr in own if tr.parent.name == "tfoot" and tr is not header_tr]:
+            skip("tfoot")  # a summary of the table, whether or not the table also has a tbody
         for tr in body:
-            if tr is header_tr or not ScrapeAdapter._cells(tr, ("td",)):  # a row of th cells only is a heading, not a part
+            if tr is header_tr or tr.parent.name == "tfoot":
+                continue
+            own_cells = ScrapeAdapter._cells(tr)
+            if not ScrapeAdapter._cells(tr, ("td",)):  # a row of th cells only is a heading, not a part
+                skip("heading_row")
+                continue
+            if len(own_cells) == 1 and len(header) > 1 and ScrapeAdapter._span(own_cells[0]) >= len(header):
+                skip("group_heading")  # one cell across the whole width: a heading such as "Brake pads", not a part
                 continue
             cells: list[str] = []
-            for cell in ScrapeAdapter._cells(tr):
+            for cell in own_cells:
                 cells.extend([cell.get_text(" ", strip=True), *[""] * (ScrapeAdapter._span(cell) - 1)])
             rows.append(cells)
         return header, rows

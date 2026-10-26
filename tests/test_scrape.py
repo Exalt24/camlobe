@@ -515,7 +515,7 @@ def test_a_row_with_the_wrong_number_of_cells_is_rejected_not_padded(sites):
     site = sites()
     adapter = make_adapter(site)
     original = adapter._table
-    adapter._table = lambda t: (lambda h, r: (h, [r[0][:3]] + r[1:]))(*original(t))
+    adapter._table = lambda t, skipped=None: (lambda h, r: (h, [r[0][:3]] + r[1:]))(*original(t, skipped))
     out = read(adapter)
     assert rows(out)[0].reject == "column_count" and rows(out)[1].reject == ""
     run = ingest(get_supplier("shop2"), make_adapter(site))

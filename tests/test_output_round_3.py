@@ -279,7 +279,7 @@ def test_a_scraped_site_walked_again_after_a_partial_walk_keeps_the_newest_price
 # skip the part that moved across the page boundary and delist it). The scraper reads no total from the site, so it has no such
 # signal: that is stated in docs/feeds.md.
 
-from catalog.models import FeedCheckpoint, PartSource, SnapshotSeen  # noqa: E402
+from catalog.models import FeedCheckpoint, PartSource, ReviewItem, SnapshotSeen  # noqa: E402
 
 
 def settle():
@@ -624,3 +624,78 @@ def test_xml_the_adversarys_descriptions_and_the_plain_element_that_must_not_cha
     ingest(supplier, FileAdapter(path))
     got = dict(RawPart.objects.filter(supplier=supplier).values_list("part_number_raw", "description_raw"))
     assert got == {"XM1001": "Brake pad set front axle, ceramic", "XM1002": "Rotor vented 300 mm", "XM1003": "Caliper   left"}
+
+
+# ---- F6: a table row that is not a part is not stored as one ---------------------------------------------------------------------
+# Rule: a group heading (one td across the whole width, or a row of th cells only) and every row of a tfoot are left out, COUNTED
+# by reason in the run's notes (`skipped_rows`: group_heading, heading_row, tfoot), never silently and never stored as a part.
+# An ordinary table, however its rows are laid out, still reads every real row and reports nothing skipped.
+
+SKIPS = st.lists(st.sampled_from(["part", "part", "part", "group", "throw"]), min_size=1, max_size=8)
+
+
+def layout_page(kinds, tfoot_rows, with_tbody, tfoot_first):
+    """A product table of four columns built from `kinds`; returns (html, the skus of the real parts, the skip counts it must report)."""
+    head = "<thead><tr><th>Part No</th><th>Brand</th><th>Description</th><th>Price</th></tr></thead>"
+    rows, skus, want = [], [], {}
+    for n, kind in enumerate(kinds):
+        if kind == "part":
+            sku = f"GH{1000 + n}"
+            skus.append(sku)
+            rows.append(f"<tr><td>{sku}</td><td>Marlow</td><td>Pad {n}</td><td>{n + 1}.00</td></tr>")
+        elif kind == "group":
+            rows.append(f'<tr class="group"><td colspan="4">Brake pads {n}</td></tr>')
+            want["group_heading"] = want.get("group_heading", 0) + 1
+        else:
+            rows.append(f'<tr><th colspan="4">Rotors {n}</th></tr>')
+            want["heading_row"] = want.get("heading_row", 0) + 1
+    foot = "".join(
+        '<tr><td colspan="4">Showing 1 to 20 of 20 parts</td></tr>' if i % 2 == 0 else "<tr><td>Total</td><td></td><td></td><td>60.00</td></tr>"
+        for i in range(tfoot_rows)
+    )
+    if tfoot_rows:
+        want["tfoot"] = tfoot_rows
+    foot = f"<tfoot>{foot}</tfoot>" if foot else ""
+    body = "".join(rows)
+    body = f"<tbody>{body}</tbody>" if with_tbody else body
+    inner = head + (foot + body if tfoot_first else body + foot)
+    return f'<html><head><title>Catalog</title></head><body><table class="products">{inner}</table></body></html>', skus, want
+
+
+@given(kinds=SKIPS, tfoot_rows=st.integers(min_value=0, max_value=3), with_tbody=st.booleans(), tfoot_first=st.booleans())
+@hyp_settings(max_examples=60, deadline=None)
+def test_headings_and_footers_are_counted_and_never_stored_as_parts(kinds, tfoot_rows, with_tbody, tfoot_first):
+    page, skus, want = layout_page(kinds, tfoot_rows, with_tbody, tfoot_first)
+    supplier = fresh_supplier()
+    adapter = adapter_for(lambda url: (200, {}, page))
+    run = ingest(supplier, adapter)
+    if not skus:
+        return  # a table with no part at all is the empty table case, which has its own rules
+    stored = sorted(RawPart.objects.filter(supplier=supplier).values_list("part_number_raw", flat=True))
+    assert run.status == PipelineRun.Status.SUCCEEDED and stored == sorted(skus)
+    assert run.rows_rejected == 0 and not RejectedRow.objects.filter(run=run).exists()
+    assert run.notes.get("skipped_rows", {}) == want
+    settle()
+    assert not ReviewItem.objects.filter(supplier=supplier).exists()  # no heading or total reached the review queue
+
+
+def test_an_ordinary_table_reads_every_row_and_reports_nothing_skipped():
+    rows = [("GH1001", "Marlow", "Pad", "20.00"), ("GH1002", "", "", ""), ("GH1003", "Marlow", "Rotor, vented", "$1,234.50")]
+    from .fakes import products_table
+
+    page = products_table(rows)
+    supplier = fresh_supplier()
+    run = ingest(supplier, adapter_for(lambda url: (200, {}, page)))
+    assert (run.status, run.rows_read, run.rows_rejected) == ("succeeded", 3, 0) and "skipped_rows" not in run.notes
+    assert RawPart.objects.filter(supplier=supplier).count() == 3
+
+
+def test_a_one_column_table_has_no_group_headings_so_every_row_is_a_part():
+    from bs4 import BeautifulSoup
+
+    from catalog.ingest.scrape import PARSER, ScrapeAdapter
+
+    html = '<table><thead><tr><th>Part No</th></tr></thead><tbody><tr><td>GH1001</td></tr><tr><td>GH1002</td></tr></tbody></table>'
+    skipped = {}
+    header, body = ScrapeAdapter._table(BeautifulSoup(html, PARSER).select_one("table"), skipped)
+    assert (header, body, skipped) == (["Part No"], [["GH1001"], ["GH1002"]], {})

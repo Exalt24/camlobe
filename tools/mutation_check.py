@@ -510,6 +510,13 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F6: a group heading, a th only row and a tfoot row are counted and never stored as parts
+    D("scrape: a tfoot row of a table with no tbody is a part", "scrape", "_table", "Eq -> NotEq", 'for tr in own if tr.parent.name == "tfoot"', R3),
+    D("scrape: a tfoot row of a table with a tbody is a part", "scrape", "_table", "and <-> or", 'if tr is header_tr or tr.parent.name == "tfoot"', R3),
+    D("scrape: a group heading row is a part", "scrape", "_table", "negate the condition", "if len(own_cells) == 1 and", R3),
+    D("scrape: a heading spanning less than the whole width counts as a group heading", "scrape", "_table", "GtE -> Lt", "_span(own_cells[0]) >= len(header)", R3),
+    D("scrape: a one column table has group headings", "scrape", "_table", "Gt -> LtE", "len(header) > 1", R3),
+    D("scrape: a skipped heading row is not counted", "scrape", "_table", "delete the call statement", 'skip("heading_row")', R3),
     # F5: the text of an XML field is the whole text of its element (the text after a child tag, a br as a space, a plain element as it was)
     D("adapters: the text after a child tag of an XML field is dropped", "adapters", "element_text", "delete the call statement", "parts.append(child.tail", R3),
     D("adapters: a br in an XML field is not a break", "adapters", "element_text", "Eq -> NotEq", '.lower() == "br"', R3),
