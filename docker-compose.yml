@@ -13,7 +13,7 @@ services:
       timeout: 3s
       retries: 20
   search:
-    image: getmeili/meilisearch:v1.12
+    image: getmeili/meilisearch:v1.12.8
     environment:
       MEILI_MASTER_KEY: camlobe-local-master-key
       MEILI_ENV: development

@@ -4,11 +4,11 @@
 
 ![A terminal replay of the real command output: three invented suppliers ingested, one feed refused for a renamed column, 19,098 parts matched, a second pass that changes nothing](docs/demo.gif)
 
-*Replayed from the real output of `python manage.py run_demo --brief` ([captured text](docs/demo-captured.txt)). Everything in it is invented data on a local database.*
+*Replayed from the output of `python manage.py run_demo --brief` ([captured text](docs/demo-captured.txt)); the word REFUSED and its reason are fixed text in that view for any failed file. Everything in it is invented data on a local database.*
 
 A Django and PostgreSQL pipeline that ingests auto parts catalogs from several suppliers' feeds, normalises part numbers, matches the same part across suppliers without guessing, and serves the result through REST and a Meilisearch index.
 
-On 20,000 invented parts, 40,008 stored feed rows from three suppliers became 19,098 parts, 14,106 of them listed by two or more suppliers. No part was merged wrongly or split against the generator's own truth file, and a second pass over every source wrote nothing ([run output](docs/test-runs/2026-10-25-run-demo-20k.txt)).
+On 20,000 invented parts, 40,008 stored feed rows from three suppliers became 19,098 parts, 14,106 of them listed by two or more suppliers. A second pass wrote nothing new (five sources are skipped on a matching content hash, and the row level case is tested) ([run output](docs/test-runs/2026-10-25-run-demo-20k.txt)). At 2,500 parts a test (`tests/test_pipeline_truth.py`) finds no part merged wrongly or split against the generator's own truth file; the 20,000 part run reports counts only.
 
 ## What it is and why it exists
 
@@ -39,7 +39,7 @@ flowchart LR
 
 | Stage | Command | What is guaranteed |
 |---|---|---|
-| Ingest | `ingest_feed` | the raw row is stored as received and never changed (a trigger refuses UPDATE and DELETE); a second run over the same source changes nothing; a killed run resumes at its checkpoint; for a supplier flagged as sending its whole catalog, a part missing from a complete run is delisted ([feeds](docs/feeds.md#full-snapshots-and-delisting)) |
+| Ingest | `ingest_feed` | the raw row is stored as received and never changed (a trigger refuses row UPDATE and DELETE for ordinary roles); a second run over the same source changes nothing; a killed run resumes at its checkpoint; for a supplier flagged as sending its whole catalog, a part missing from a complete run is delisted ([feeds](docs/feeds.md#full-snapshots-and-delisting)) |
 | Normalise | `normalize_parts` | one canonical number per row, with the rules that fired recorded ([rules](docs/normalization.md)) |
 | Match | `match_parts` | the same brand and number across suppliers is one part; a row with no brand or with a conflicting barcode goes to a review queue instead of being merged ([rule](docs/matching.md)) |
 | Index | `rebuild_search_index`, `sync_search_index` | the rebuild resumes and swaps in at the end; the sync sends only parts that changed |
@@ -57,7 +57,7 @@ Windows 11 desktop, Docker Postgres 17 on localhost, one process. Counts and tim
 | 20,000 parts ([output](docs/test-runs/2026-10-25-run-demo-20k.txt), same counts again after two fixes: [output](docs/test-runs/2026-10-26-run-demo-20k.txt), and after the review fixes below: [output](docs/test-runs/2026-10-26-run-demo-20k-after-review.txt)) | 40,008 | 19,098 | 14,106 | 500 | 1.1 to 2.0 s | 3.3 s | 11.0 s |
 | 100,000 parts ([output](docs/test-runs/2026-10-25-run-demo-100k.txt)) | 199,886 | 95,345 | 70,468 | 2,518 | 5.2 to 11.4 s | 20.0 s | 65.7 s |
 
-`python manage.py check_query_plans` runs `EXPLAIN ANALYZE` on the queries the pipeline and API depend on and fails when one stops using its index. At 20,000 parts the nine checked queries each took under 3 ms. It also found two real problems while it was being written: Django had generated a partial index on the barcode with a predicate Postgres could not use, and a second index on the part number duplicated the one that serves both equality and prefix search.
+`python manage.py check_query_plans` runs `EXPLAIN ANALYZE` on the queries the pipeline and API depend on and fails when one stops using its index. At 20,000 parts the checked queries (eight in the captured demo, nine in the later runs) each took under 3 ms.
 
 ## What was hard
 
@@ -72,31 +72,31 @@ Windows 11 desktop, Docker Postgres 17 on localhost, one process. Counts and tim
 No account or key is needed. Docker, Python 3.13 and Git Bash on Windows 11 are what it was run with.
 
 ```bash
-docker compose up -d                       # Postgres 17 on 5434, Meilisearch on 7701
+docker compose up -d --wait                # Postgres 17 on 5434, Meilisearch on 7701, waits until both are healthy
 python -m venv .venv && . .venv/Scripts/activate    # macOS or Linux: . .venv/bin/activate
 pip install -r requirements-dev.txt
 python manage.py migrate
-python manage.py run_demo                  # about 30 s: generate, ingest, match, fitment, plans, index, then again
+python manage.py run_demo                  # generate, ingest, match, fitment, plans, index, then again (the saved 20,000 part run shows about 25 s of stages plus the index)
 ```
 
-`run_demo` needs an empty database and prints every stage with its timing, ending in a summary that matches the first table above. The macOS and Linux activate line and the `docker compose` commands outside Windows were not run here.
+`run_demo` needs an empty database and prints every stage with its timing, ending (without `--brief`) in a summary that matches the first table above. The macOS and Linux activate line and the `docker compose` commands outside Windows were not run here.
 
-Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/parts/search/?q=h-4123%20a"`.
+Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/parts/search/?q=zr%200014%20p"`.
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 955 tests, needs Postgres on 5434 and Meilisearch on 7701
-python tools/mutation_check.py             # 296 guards, edits source in place: run it in a copy (--help)
+python -m pytest tests/ -o addopts=""      # 955 tests, about 7 minutes, needs Postgres on 5434 and Meilisearch on 7701
+python tools/mutation_check.py             # 296 guards, about 30 minutes, edits source in place: run it in a copy (--help)
 ```
 
-The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and CI starts both.
+The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and the CI workflow starts both (it has not run yet: see the register).
 
-- 955 tests: 954 passed in a run on 2026-10-26 after the second scraper output round, then one test was added that pins the proxy password with an at sign, since a full guard run showed the property tests only drew one by chance ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)); 686 passed after the first ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)), 597 after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
-- Every rule has a test in both directions: the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
-- Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures in every stage, and the two end states must be identical by content.
+- 955 tests: 954 passed on 2026-10-26 after the second scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)) and again in a run by someone else ([output](docs/test-runs/2026-10-26-pytest-lead-run.txt)), then one test was added that pins a proxy password with an at sign. Earlier counts: 686, 597, 442 and 435 ([outputs](docs/test-runs/)).
+- The part number, matching and mapping rules have tests for the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
+- Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness: 296 guards. On 2026-10-25 all 144 then in the harness were killed ([output](docs/test-runs/2026-10-25-mutation.txt)), after ten survivors in the first passes that each ended as a new test, a removed redundant guard or a fix to the harness. After the second review all 234 were killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)), and after the first scraper output round 115 of 115 new or touched ones ([output](docs/test-runs/2026-10-26-mutation-output-round.txt)). Most guards since then have their edit derived from the syntax tree by `tools/mutate_ast.py` (in the repository), not matched as text. After the second output round all 295 guards then in the harness were run in a copy of the repository and killed in 1,822 s ([output](docs/test-runs/2026-10-26-mutation-second-round-295.txt)); the guard added after that run and the one it changed were killed in a second run. Two guards are weaker than the rest: the one for the rel token only empties the default selector, and the SOCKS one is a text pair on `requirements.txt`, which `mutate_ast.py` cannot edit.
+- Mutation harness: 296 guards, 64 of them with the edit derived from the syntax tree by `tools/mutate_ast.py` (in the repository) and 232 matched as text. On 2026-10-25 all 144 then in the harness were killed ([output](docs/test-runs/2026-10-25-mutation.txt)). After the second review the 234 then in the harness were run in three parts and killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)): one survivor in the first part was a test too weak to tell the guard, and the docs guards were run again after a redundant branch was removed. After the second output round the writer killed all 295 then in the harness in a copy of the repository in 1,822 s ([output](docs/test-runs/2026-10-26-mutation-second-round-295.txt)). A full run of all 296 by someone else in a copy killed 295 and let one survive (the proxy password guard, which relied on Hypothesis drawing an at sign); a hand written test now kills it ([output](docs/test-runs/2026-10-26-mutation-lead-full-run.txt)). Two guards are weaker than the rest: the one for the rel token only empties the default selector, and the SOCKS one is a text pair on `requirements.txt`, which `mutate_ast.py` cannot edit.
 
 ## Register: what ran and what did not
 
