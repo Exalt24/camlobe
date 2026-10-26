@@ -30,6 +30,9 @@ class SourceGap:
     first_position: int
     last_position: int
     message: str
+    # True when the rows already read cannot be trusted to line up with the rest of this pass (the source's own total moved
+    # while it was walked): the next run then starts over from the first row as a new pass instead of resuming at the checkpoint
+    restart: bool = False
 
 
 class FeedAdapter(Protocol):

@@ -17,7 +17,9 @@ fetch one page. The rules:
     each request starting where the last answer ended, until a page comes back empty;
   - a page whose items are exactly those of a page already read in this run (a server that answers every offset
     with page 0, a cache in front of it) is a gap coded E_PAGE_REPEATED: its rows are not stored a second time and
-    the rows that belong at that offset are missing, so the run must not look complete.
+    the rows that belong at that offset are missing, so the run must not look complete;
+  - a total that differs from the one the first answer of the run gave means rows moved while the walk was on its way: a gap
+    coded E_TOTAL_CHANGED (the run is partial, nothing is delisted) that also says the next run starts over from the first page.
 """
 from __future__ import annotations
 
@@ -156,6 +158,18 @@ class PagedAdapter:
                 offset += self.page_size
                 continue
             if page_total is not None:
+                if total is not None and page_total != total:
+                    # the source's own total moved while we walked it: rows were added or withdrawn, so every row after the change
+                    # sits one place off in an offset walk and a part can be skipped. The walk is not proven complete, and the
+                    # next run starts again from the first page, since resuming at the checkpoint would skip over the shift
+                    self._stats["total_changed"] = [total, page_total, offset]
+                    yield SourceGap(
+                        offset + 1,
+                        max(offset + 1, min(page_total, offset + self.page_size)),
+                        f"E_TOTAL_CHANGED: the source's total went from {total} to {page_total} while the walk was at offset {offset}, "
+                        "so rows may have moved between pages and the walk is not proven complete",
+                        restart=True,
+                    )
                 total = page_total
             identity = page_identity(items) if len(items) >= MIN_ITEMS_TO_CALL_A_REPEAT else ""
             if identity and identity in seen_pages:

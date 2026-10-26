@@ -271,3 +271,111 @@ def test_a_scraped_site_walked_again_after_a_partial_walk_keeps_the_newest_price
         run = ingest(supplier, spy)
         assert run.status == (PipelineRun.Status.PARTIAL if blocked else PipelineRun.Status.SUCCEEDED)
         model.check(supplier, run, *model.feed(spy.yielded))
+
+
+# ---- F2: a walk whose own reported total changes between pages is not proven complete --------------------------------------------
+# Rule: a total that differs from the one the first answer of the run gave ends the run PARTIAL with a coded gap (E_TOTAL_CHANGED),
+# so nothing is delisted, and the next run starts again from the first page (resuming at the checkpoint over a shifted list would
+# skip the part that moved across the page boundary and delist it). The scraper reads no total from the site, so it has no such
+# signal: that is stated in docs/feeds.md.
+
+from catalog.models import FeedCheckpoint, PartSource, SnapshotSeen  # noqa: E402
+
+
+def settle():
+    normalize_pending()
+    match_pending()
+
+
+def snapshot_supplier():
+    supplier = fresh_supplier()
+    supplier.full_snapshot = True
+    supplier.save()
+    return supplier
+
+
+def listed(supplier):
+    return sorted(PartSource.objects.filter(supplier=supplier, delisted_at__isnull=True).values_list("supplier_part_number", flat=True))
+
+
+class Wobble(PagedAdapter):
+    """Ten items, five pages of two, and the total each answer reports is taken from `totals` in turn."""
+
+    def __init__(self, totals, **kwargs):
+        super().__init__("wobble", page_size=2, max_retries=0, **kwargs)
+        self.totals, self.reported = list(totals), []
+
+    def fetch_page(self, offset, limit):
+        total = self.totals[len(self.reported) % len(self.totals)]
+        self.reported.append(total)
+        items = [{"sku": f"WB{1000 + i}", "manufacturer": "Marlow", "title": "Oil filter", "price": "10.00"} for i in range(10)]
+        return items[offset : offset + limit], total
+
+
+@given(st.lists(st.sampled_from([8, 9, 10]), min_size=1, max_size=6))
+@hyp_settings(max_examples=50, deadline=None)
+def test_a_walk_is_a_success_only_when_every_answer_reported_the_same_total(totals):
+    supplier = snapshot_supplier()
+    ingest(supplier, Wobble([10]))  # day 1: a clean pass lists all ten
+    settle()
+    everything = listed(supplier)
+    adapter = Wobble(totals)
+    run = ingest(supplier, adapter)
+    settle()
+    moved = len(set(adapter.reported)) > 1
+    assert run.status == (PipelineRun.Status.PARTIAL if moved else PipelineRun.Status.SUCCEEDED)
+    if moved:
+        assert run.errors[0]["message"].startswith("E_TOTAL_CHANGED")
+        assert "snapshot" not in run.notes  # a partial run applies no snapshot
+        assert listed(supplier) == everything  # nothing delisted by a walk that was not proven complete
+        checkpoint = FeedCheckpoint.objects.get(supplier=supplier)
+        assert (checkpoint.position, checkpoint.completed) == (0, False)  # the next run starts again from the first page
+        assert not SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=True).exists()
+        again = ingest(supplier, Wobble([10]))
+        assert again.status == PipelineRun.Status.SUCCEEDED and "resumed_from" not in again.notes
+
+
+@pytest.mark.parametrize("kind", ["rest", "soap"])
+def test_a_part_withdrawn_while_a_rest_or_soap_walk_is_on_its_first_page_delists_nothing_that_day_and_only_it_the_next(kind):
+    """The adversary's case on the real adapters: 24 parts, four to a page, RX1001 withdrawn after page one is served."""
+    from catalog.ingest.rest import RestAdapter
+    from catalog.ingest.soap import SoapAdapter
+
+    from .fakes import Behaviour, rest_server, soap_server
+
+    class Withdraws(Behaviour):
+        withdraw = None  # the sku to drop when the SECOND request arrives, so the first answer still reported 24
+
+        def decide(self, offset, limit, auth):
+            with self.lock:
+                if self.withdraw and len(self.requests) == 1:
+                    self.items[:] = [i for i in self.items if i["sku"] != self.withdraw]
+            return super().decide(offset, limit, auth)
+
+    items = [{"sku": f"RX{1000 + i}", "manufacturer": "Marlow", "title": "Oil filter", "price": f"{10 + i}.00", "gtin": ""} for i in range(24)]
+    behaviour = Withdraws(items)
+    server = (rest_server if kind == "rest" else soap_server)(behaviour)
+
+    def walk(supplier):
+        if kind == "rest":
+            adapter = RestAdapter(f"http://127.0.0.1:{server.port}/catalog", page_size=4, max_retries=0)
+        else:
+            adapter = SoapAdapter(f"http://127.0.0.1:{server.port}/catalog?wsdl", page_size=4, max_retries=0)
+        run = ingest(supplier, adapter)
+        settle()
+        return run
+
+    try:
+        supplier = snapshot_supplier()
+        assert walk(supplier).status == PipelineRun.Status.SUCCEEDED
+        behaviour.withdraw = "RX1001"
+        behaviour.requests.clear()
+        day2 = walk(supplier)
+        assert day2.status == PipelineRun.Status.PARTIAL and "E_TOTAL_CHANGED" in day2.errors[0]["message"]
+        assert len(listed(supplier)) == 24  # nothing delisted, not even the withdrawn part: the walk was not proven complete
+        behaviour.withdraw = None
+        day3 = walk(supplier)
+        assert day3.status == PipelineRun.Status.SUCCEEDED and "resumed_from" not in day3.notes
+        assert len(listed(supplier)) == 23 and "RX1004" in listed(supplier) and "RX1001" not in listed(supplier)
+    finally:
+        server.close()

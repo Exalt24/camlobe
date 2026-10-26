@@ -221,7 +221,7 @@ MUTANTS: list[Mutant] = [
     D("runner: an unchanged row is stored again", "runner", "_store_batch", "Eq -> NotEq", "latest.get(", INGEST, R3),
     M("runner: rows before a gap do not move the checkpoint", "runner", "flush()  # what was read before the gap is whole, so it moves the checkpoint", "pass", REMOTE),
     M("runner: the checkpoint moves past a gap", "runner", "advance = contiguous and not batch.had_gap", "advance = True", INGEST, REMOTE),
-    M("runner: a gap does not make the run partial", "runner", "    if gap_seen:\n        return finish_run(run, PipelineRun.Status.PARTIAL)", "    if False:\n        return finish_run(run, PipelineRun.Status.PARTIAL)", INGEST, REMOTE),
+    M("runner: a gap does not make the run partial", "runner", "    if gap_seen:\n        if restart_pass:", "    if False:\n        if restart_pass:", INGEST, REMOTE),
     M("runner: counts are not saved with the batch", "runner", "PipelineRun.objects.filter(pk=run.pk).update(**counts)", "pass", INGEST),
     M("runner: a batch is not one transaction", "runner", "    with transaction.atomic():\n        latest = {", "    if True:\n        latest = {", INGEST),
     M("runs: a run left running by a dead process is not closed", "runs", "stale.update(", "stale.none().update(", INGEST),
@@ -358,7 +358,7 @@ MUTANTS: list[Mutant] = [
     M("runner: a snapshot pass keeps nothing it read", "runner", "if supplier.full_snapshot and seen:", "if False:", DELIST),
     M("runner: an unreadable row is not marked", "runner", '            if reason in UNREADABLE:\n                seen.add(("", ""))', '            if False:\n                seen.add(("", ""))', DELIST),
     M("runner: a row rejected for its cost is not counted as listed", "runner", "            elif (identity := row_identity(rec.fields, mapping)) is not None:", "            elif False:", DELIST),
-    D("runner: a new pass keeps what the last pass read", "runner", "_ingest_locked", "delete the call statement", "staging=True).delete()", DELIST),
+    D("runner: a new pass keeps what the last pass read", "runner", "_begin_pass", "delete the call statement", "staging=True).delete()", DELIST),
     M("runner: a NUL in a row fails the whole batch", "runner", "if not reason and any(NUL in value for value in rec.fields.values()):", "if False:", INGEST),
     M("docs: a delisted listing still sets the lowest cost", "docs", 'lowest_cost=Min("sources__cost_cents", filter=Q(sources__delisted_at__isnull=True)),', 'lowest_cost=Min("sources__cost_cents"),', DELIST),
     M("docs: a delisted listing still counts as a supplier", "docs", "live = Q(sources__isnull=False, sources__delisted_at__isnull=True)", "live = Q(sources__isnull=False)", DELIST),
@@ -510,6 +510,10 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F2: a total that moves during a walk is a coded gap, and the next run starts again instead of resuming over the shift
+    D("paged: a total that moves during the walk is not noticed", "paged", "records", "NotEq -> Eq", "page_total != total", R3),
+    D("paged: a total that moves is a gap that does not ask for a restart", "paged", "records", "True -> False", "restart=True", R3),
+    D("runner: a gap that asks for a restart is resumed at the checkpoint", "runner", "_ingest_locked", "negate the condition", "if restart_pass:", R3),
 ]
 
 

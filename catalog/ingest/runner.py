@@ -66,6 +66,16 @@ def ingest(supplier: Supplier, adapter: FeedAdapter, batch_size: int = 1000, all
             return finish_run(run, PipelineRun.Status.FAILED)
 
 
+def _begin_pass(checkpoint: FeedCheckpoint, run: PipelineRun, fingerprint: str) -> None:
+    """The source is read from its first row as a new pass, with nothing seen yet."""
+    checkpoint.fingerprint = fingerprint
+    checkpoint.pass_id = run.pk  # the run that began this pass, kept for the record (the key holds the run that wrote a row)
+    checkpoint.position = 0
+    checkpoint.completed = False
+    checkpoint.save()  # completed_at stays: it dates the last COMPLETED pass, whose seen set stays what the match step reads
+    SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=True).delete()  # a new pass starts with nothing seen
+
+
 def _ingest_locked(
     supplier: Supplier, adapter: FeedAdapter, run: PipelineRun, batch_size: int, allow_mass_delist: bool, redact: Redactor
 ) -> PipelineRun:
@@ -77,12 +87,7 @@ def _ingest_locked(
     restart = not getattr(adapter, "resumable", True)
     if restart or checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):
         # new content (or a live source, which has no identity to compare): read it from the start
-        checkpoint.fingerprint = fingerprint
-        checkpoint.pass_id = run.pk  # the run that began this pass, kept for the record (the key holds the run that wrote a row)
-        checkpoint.position = 0
-        checkpoint.completed = False
-        checkpoint.save()  # completed_at stays: it dates the last COMPLETED pass, whose seen set stays what the match step reads
-        SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=True).delete()  # a new pass starts with nothing seen
+        _begin_pass(checkpoint, run, fingerprint)
     elif checkpoint.completed:
         run.notes["skipped"] = "source unchanged since the last complete run"
         return finish_run(run, PipelineRun.Status.SUCCEEDED)
@@ -93,6 +98,7 @@ def _ingest_locked(
     headers: dict[str, None] = {}  # an ordered set: of two columns for one field, the left one comes first
     contiguous = True
     gap_seen = False
+    restart_pass = False  # a gap that says the rows read so far do not line up with the rest of the pass
     batch = _Batch()
     first_seen: dict[int, int] = {}  # part -> the content of its first row in THIS run (see DUPLICATE_PART)
 
@@ -110,6 +116,7 @@ def _ingest_locked(
             flush()  # what was read before the gap is whole, so it moves the checkpoint
             contiguous = False
             gap_seen = True
+            restart_pass = restart_pass or item.restart
             batch.had_gap = True
             add_error(run, f"positions {item.first_position}-{item.last_position}", redact.text(item.message))
             continue
@@ -123,6 +130,9 @@ def _ingest_locked(
     run.notes.update(redact.data(adapter.notes()))
     checkpoint.refresh_from_db()
     if gap_seen:
+        if restart_pass:  # resuming at the checkpoint over a source that shifted would skip rows it still offers
+            _begin_pass(checkpoint, run, fingerprint)
+            run.notes["restart"] = "the next run reads the source from its first row"
         return finish_run(run, PipelineRun.Status.PARTIAL)
     with transaction.atomic():  # the pass becomes the latest completed one, with its own seen set, in one step
         SnapshotSeen.objects.filter(checkpoint=checkpoint, staging=False).delete()
