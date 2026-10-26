@@ -163,7 +163,12 @@ def test_a_new_version_of_a_linked_listing_refreshes_it_and_touches_the_part(tmp
 
 
 def test_two_versions_of_one_listing_in_one_batch_make_one_link_with_the_newest_data(tmp_path):
-    load(tmp_path, "s1", [row("H4123A", cost="5.00"), row("H4123A", cost="6.00")])
+    # two files before the match step runs (one file lists a part once: a second row of it with other content is refused)
+    s = get_supplier("s1")
+    ingest(s, FileAdapter(write_csv(tmp_path / "a.csv", [row("H4123A", cost="5.00")])))
+    ingest(s, FileAdapter(write_csv(tmp_path / "b.csv", [row("H4123A", cost="6.00")])))
+    normalize_pending()
+    match_pending()
     source = PartSource.objects.get()
     assert source.cost_cents == 600 and Part.objects.count() == 1
     assert sorted(NormalizedRow.objects.values_list("match_state", flat=True)) == ["matched", "matched"]
