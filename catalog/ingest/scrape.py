@@ -464,6 +464,23 @@ class ScrapeAdapter:
             return 1
 
     @staticmethod
+    def _cell_text(cell) -> str:
+        """The text of a body cell, its pieces joined by a space (as `get_text(" ", strip=True)`), except one: cents printed in a
+        `sup` right after whole dollars (`$12<sup>50</sup>`) are the cents of that amount, `$12.50`, and not a second number.
+        Only a sup of exactly two digits after a number with no decimal point reads so; a footnote mark is not cents."""
+        pieces: list[str] = []
+        for node in cell.strings:  # the same strings get_text reads: no comment, script or style text
+            text = node.strip()
+            if not text:
+                continue
+            tail = re.search(r"[\d.,]+$", pieces[-1]) if pieces else None
+            if node.parent.name == "sup" and node.parent is not cell and re.fullmatch(r"\d{2}", text) and tail and "." not in tail.group():
+                pieces[-1] += "." + text
+            else:
+                pieces.append(text)
+        return " ".join(pieces)
+
+    @staticmethod
     def _table(table, skipped: dict | None = None) -> tuple[list[str], list[list[str]]]:
         """(the header, the rows) of the product table, read from ITS OWN rows (never a nested table's) and cells (a th in a body
         row is a cell like a td). A cell with colspan fills that many columns, in the header and in a row. The header is the
@@ -501,7 +518,7 @@ class ScrapeAdapter:
                 continue
             cells: list[str] = []
             for cell in own_cells:
-                cells.extend([cell.get_text(" ", strip=True), *[""] * (ScrapeAdapter._span(cell) - 1)])
+                cells.extend([ScrapeAdapter._cell_text(cell), *[""] * (ScrapeAdapter._span(cell) - 1)])
             rows.append(cells)
         return header, rows
 

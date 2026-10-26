@@ -699,3 +699,95 @@ def test_a_one_column_table_has_no_group_headings_so_every_row_is_a_part():
     skipped = {}
     header, body = ScrapeAdapter._table(BeautifulSoup(html, PARSER).select_one("table"), skipped)
     assert (header, body, skipped) == (["Part No"], [["GH1001"], ["GH1002"]], {})
+
+
+# ---- F7: price cell shapes as shops print them ----------------------------------------------------------------------------------
+# Rule: accept exactly the shapes that are unambiguous: ONE amount (grouped by a space or a no-break space in groups of three, or
+# not grouped) with at most one currency marker of the dollar (`$`, `US$`, `USD`) on either side, and cents printed in a sup right
+# after whole dollars. Keep refusing anything with two amounts, another currency, or a split that could be cents or thousands
+# (33c9f60 refuses those on purpose). What stays refused is a KNOWN_LIMIT in docs/feeds.md.
+
+from catalog.ingest.mapping import RowRejected, parse_cost_cents  # noqa: E402
+
+NBSP = " "
+NARROW = " "
+
+
+def grouped(cents, sep):
+    dollars, rest = divmod(cents, 100)
+    digits = f"{dollars:,}".replace(",", sep)
+    return f"{digits}.{rest:02d}"
+
+
+SHAPES = [
+    "{a}", "${a}", "$ {a}", "${nb}{a}", "$" + NBSP + "{a}", "{a} $", "{a}" + NBSP + "$", "{a} USD", "{a}USD", "USD {a}", "USD" + NBSP + "{a}",
+    "$ {a} USD", "$" + "{a} USD", "US${a}", "US$ {a}", "usd {a}", "{a} usd",
+]
+
+
+@given(
+    cents=st.integers(min_value=1, max_value=9_999_999_99),
+    sep=st.sampled_from(["", ",", " ", NBSP, NARROW]),
+    shape=st.sampled_from(SHAPES),
+)
+@hyp_settings(max_examples=300, deadline=None)
+def test_one_amount_with_one_currency_marker_and_any_grouping_is_that_amount(cents, sep, shape):
+    amount = grouped(cents, sep)
+    assert parse_cost_cents(shape.replace("{nb}", NBSP).format(a=amount)) == cents
+
+
+@given(
+    first=st.integers(min_value=1, max_value=99_999_99),
+    second=st.integers(min_value=1, max_value=99_999_99),
+    glue=st.sampled_from([" ", " / ", " - ", NBSP, " USD ", " $", "  $"]),
+    marker=st.sampled_from(["", "$", "USD ", "US$"]),
+)
+@hyp_settings(max_examples=300, deadline=None)
+def test_a_cell_with_two_amounts_is_still_refused_whatever_surrounds_them(first, second, glue, marker):
+    a, b = f"{first // 100}.{first % 100:02d}", f"{second // 100}.{second % 100:02d}"
+    with pytest.raises(RowRejected):
+        parse_cost_cents(f"{marker}{a}{glue}{marker}{b}")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["12 50", "12" + NBSP + "50", "12,50", "12.505", "EUR 12.50", "12.50 EUR", "12.50 GBP", "USD 12.50 USD", "$12.50 $", "12 USD 50", "USD", "$$12.50",
+     "US$ 12.50 USD", "12.50 USD 3.00", "-3", "N/A", "12.50 each"],
+)
+def test_what_stays_refused_stays_refused(text):
+    with pytest.raises(RowRejected):
+        parse_cost_cents(text)
+
+
+def test_a_blank_or_a_currency_marker_alone_is_no_cost_or_refused_as_before():
+    assert parse_cost_cents("") is None and parse_cost_cents("  ") is None and parse_cost_cents(NBSP) is None
+    assert parse_cost_cents("$") is None  # as before: a sign with no amount is a blank price
+
+
+@pytest.mark.parametrize(
+    "cell, cents",
+    [
+        ("$&nbsp;12.50", 1250), ("1&nbsp;234.50", 123450), ("$12.50 USD", 1250), ("$12<sup>50</sup>", 1250), ("USD 12.50", 1250),
+        ("12.50&nbsp;$", 1250), ("$1,234<sup>50</sup>", 123450), ("<span>$12</span><sup>05</sup>", 1205), ("1&#8239;234.50", 123450),
+        ("$12<sup>50</sup> USD", 1250),
+    ],
+)
+def test_the_price_cells_the_adversary_found_are_stored_through_the_scraper(cell, cents):
+    from .fakes import products_table
+
+    page = products_table([("SH1001", "Marlow", "Oil filter", cell)])
+    supplier = fresh_supplier()
+    run = ingest(supplier, adapter_for(lambda url: (200, {}, page)))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_rejected == 0
+    assert RawPart.objects.get(supplier=supplier).cost_cents == cents
+
+
+@pytest.mark.parametrize(
+    "cell",
+    ["$12<sup>1</sup>", "$12<sup>*</sup>", "$12.50<sup>12</sup>", "12 <b>50</b>", "<s>$20</s> <b>$15</b>", "$12<sup>50</sup> $13"],
+)
+def test_a_sup_that_is_not_two_digits_of_cents_and_a_split_that_is_not_one_stay_refused(cell):
+    from .fakes import products_table
+
+    run = ingest(fresh_supplier(), adapter_for(lambda url: (200, {}, products_table([("SH1001", "Marlow", "Oil filter", cell)]))))
+    assert run.rows_rejected == 1 and run.rows_written == 0

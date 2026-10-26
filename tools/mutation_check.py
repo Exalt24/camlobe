@@ -510,6 +510,12 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F7: one amount with one currency marker, grouped by a space or a no-break space, and cents in a sup; two amounts stay refused
+    D("mapping: a no-break space does not group thousands", "mapping", "_plain_spaces", "return value -> None", "return text.translate", R3, MAP),
+    D("mapping: a cell with two currency markers is read as one amount", "mapping", "parse_cost_cents", "Gt -> LtE", "flags=re.I)) > 1", R3),
+    D("mapping: a currency marker beside an amount is left in the cell", "mapping", "parse_cost_cents", "negate the condition", "stripped):", R3),
+    D("scrape: cents printed in a sup are read as a second number", "scrape", "_cell_text", "negate the condition", 'if node.parent.name == "sup"', R3),
+    D("scrape: a sup after an amount with a decimal point is read as cents", "scrape", "_cell_text", "NotIn -> In", '"." not in tail.group()', R3),
     # F6: a group heading, a th only row and a tfoot row are counted and never stored as parts
     D("scrape: a tfoot row of a table with no tbody is a part", "scrape", "_table", "Eq -> NotEq", 'for tr in own if tr.parent.name == "tfoot"', R3),
     D("scrape: a tfoot row of a table with a tbody is a part", "scrape", "_table", "and <-> or", 'if tr is header_tr or tr.parent.name == "tfoot"', R3),

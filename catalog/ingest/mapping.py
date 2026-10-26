@@ -101,17 +101,32 @@ class RowRejected(Exception):
         self.reason = reason
 
 
+def _plain_spaces(text: str) -> str:
+    """A no-break space (U+00A0) and the narrow one of French and Swiss prices (U+202F) group thousands like a plain space."""
+    spaces = {
+        0xA0: " ",  # no-break space
+        0x202F: " ",  # narrow no-break space
+    }
+    return text.translate(spaces)
+
+
 def parse_cost_cents(text: str) -> int | None:
     """Dollars as text to integer cents. Blank is None. Anything ambiguous is rejected, never guessed.
 
-    Accepted: 12, 12.5, 12.50, $12.50, 1,234.50, 12.5000, 1 234.50. Rejected: 12,50 (a decimal comma looks like a
+    Accepted: 12, 12.5, 12.50, $12.50, 1,234.50, 12.5000, 1 234.50 (a space or a no-break space groups thousands), and ONE amount
+    with a currency marker on either side: `$12.50 USD`, `USD 12.50`, `US$12.50`, `12.50 $`. Rejected: 12,50 (a decimal comma looks like a
     thousands separator), 12.505 (half a cent), -3, N/A, a cost above ten million dollars, and a cell holding TWO
     amounts (`$20 $15`, a struck price and a new one: gluing them gave 2015 dollars).
 
     One shape is not told apart: spaces that group thousands (`1 234.50`) are accepted, so two bare whole amounts with no
     currency sign and no cents (`12 345`) read as one. Rejecting the grouping would refuse an ordinary price.
     """
-    text = (text or "").strip()
+    text = _plain_spaces(text or "").strip()  # a no-break space groups thousands like a space
+    if len(re.findall(r"US\$|USD", text, flags=re.I)) > 1:  # one amount carries at most one currency marker
+        raise RowRejected("bad_cost")
+    stripped = re.sub(r"^(?:US\$|USD)\s*|\s*USD$", "", text, flags=re.I).strip()  # `USD 12.50`, `$12.50 USD`: the currency the column is in
+    if re.search(r"\d", stripped):  # a marker with no amount beside it (`USD`) is not a price, and is not read as a blank one
+        text = stripped
     if text.count("$") > 1 or re.search(r"\d *\$ *\d", text):  # an amount, a sign, another amount: two prices
         raise RowRejected("bad_cost")
     value = text.replace("$", "")
