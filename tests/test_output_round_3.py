@@ -379,3 +379,111 @@ def test_a_part_withdrawn_while_a_rest_or_soap_walk_is_on_its_first_page_delists
         assert len(listed(supplier)) == 23 and "RX1004" in listed(supplier) and "RX1001" not in listed(supplier)
     finally:
         server.close()
+
+
+# ---- F3: a feed cut inside its last row is not stored as a clean success ---------------------------------------------------------
+# Rule: two signals only, because only they cannot be an ordinary file: the text ends inside an open quote, or the final record has
+# fewer fields than the header and no line break after it. The cut row is not stored and the run is partial (E_FILE_TRUNCATED).
+# A cut that leaves every column in place (`123.45` cut to `1`) has no signal, since a valid file may end without a newline:
+# KNOWN_LIMIT in docs/feeds.md, pinned below so the documentation stays true. SFTP reads the downloaded file through the same
+# FileAdapter, so the test through an SFTP server shares the fix.
+
+import csv  # noqa: E402
+import io  # noqa: E402
+
+from catalog.models import FeedCheckpoint  # noqa: E402, F811
+from .test_remote_adapters import adapter_for as sftp_adapter_for, sftp  # noqa: E402, F401
+
+DESCRIPTIONS = st.sampled_from(["Pad", "Pad, front", "Rotor, vented, 300 mm", 'Hose 5" long'])
+
+
+def csv_bytes(rows, final_newline=True):
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(["PartNo", "Mfr", "Description", "Cost"])
+    writer.writerows(rows)
+    text = buf.getvalue()
+    return (text if final_newline else text[:-2]).encode("utf-8")
+
+
+def last_row_text(rows):
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="").writerow(rows[-1])
+    return buf.getvalue()
+
+
+def what_a_prefix_of_the_last_row_shows(prefix):
+    """By hand, not by the parser under test: (inside an open quote, number of fields complete or begun)."""
+    inside, commas = False, 0
+    for ch in prefix:
+        if ch == '"':
+            inside = not inside
+        elif ch == "," and not inside:
+            commas += 1
+    return inside, commas + 1
+
+
+@given(
+    rows=st.lists(st.tuples(DESCRIPTIONS, st.sampled_from(["12.34", "7.00", "123.45"])), min_size=1, max_size=5),
+    data=st.data(),
+)
+@hyp_settings(max_examples=80, deadline=None)
+def test_a_csv_cut_anywhere_in_its_last_row_is_partial_when_it_shows_the_cut_and_stored_when_it_cannot(rows, data, tmp_path_factory):
+    table = [[f"FT{1000 + i}", "Marlow", description, cost] for i, (description, cost) in enumerate(rows)]
+    whole = csv_bytes(table, final_newline=False)
+    last = last_row_text(table).encode("utf-8")
+    cut_at = data.draw(st.integers(min_value=0, max_value=len(last)))  # 0 is a file that ends at a line break
+    body = whole[: len(whole) - len(last) + cut_at]
+    path = tmp_path_factory.mktemp("o3cut") / "feed.csv"
+    path.write_bytes(body)
+    supplier = fresh_supplier()
+    run = ingest(supplier, FileAdapter(path))
+    prefix = last[:cut_at].decode("utf-8")
+    inside, fields = what_a_prefix_of_the_last_row_shows(prefix)
+    shows_the_cut = cut_at > 0 and cut_at < len(last) and (inside or fields < 4)
+    if shows_the_cut:
+        assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_FILE_TRUNCATED")
+        assert RawPart.objects.filter(supplier=supplier).count() == len(table) - 1  # every whole row, never the cut one
+        assert not RejectedRow.objects.filter(run=run).exists()
+        assert not FeedCheckpoint.objects.get(supplier=supplier).completed
+    else:
+        assert run.status == PipelineRun.Status.SUCCEEDED
+        # a cut that leaves every column is stored as the number it now is, or rejected when it is no number (`123.`): no signal either way
+        assert RawPart.objects.filter(supplier=supplier).count() + RejectedRow.objects.filter(run=run).count() == (len(table) if cut_at else len(table) - 1)
+
+
+def test_known_limit_a_cut_inside_the_last_cell_with_every_column_present_reads_as_an_ordinary_file(tmp_path):
+    """No rule separates `...,Caliper,1` (cut from 123.45) from a file that ends without a newline: stored as 100 cents."""
+    path = tmp_path / "feed.csv"
+    path.write_bytes(csv_bytes([["FT1001", "Marlow", "Pad", "20.00"]]) + b"FT1002,Marlow,Caliper,1")
+    run = ingest(fresh_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.SUCCEEDED
+    assert RawPart.objects.get(part_number_raw="FT1002").cost_cents == 100
+
+
+def test_a_whole_csv_with_or_without_its_last_line_break_is_an_ordinary_success(tmp_path):
+    rows = [["FT1001", "Marlow", 'Pad, "front"', "20.00"], ["FT1002", "Marlow", "Rotor", "40.00"]]
+    for final_newline in (True, False):
+        path = tmp_path / f"feed{final_newline}.csv"
+        path.write_bytes(csv_bytes(rows, final_newline))
+        run = ingest(fresh_supplier(), FileAdapter(path))
+        assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 2 and not run.errors
+
+
+def test_a_short_last_row_with_a_line_break_after_it_is_still_one_rejected_row(tmp_path):
+    path = tmp_path / "feed.csv"
+    path.write_bytes(csv_bytes([["FT1001", "Marlow", "Pad", "20.00"]]) + b"FT1002,Marlow\r\n")
+    run = ingest(fresh_supplier(), FileAdapter(path))
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_rejected == 1
+    assert RejectedRow.objects.get(run=run).reason == "column_count"
+
+
+def test_the_same_cut_file_arriving_over_sftp_is_partial_too(sftp, tmp_path):
+    from catalog.ingest.sftp import SftpAdapter  # noqa: F401
+
+    (sftp.root / "feed.csv").write_bytes(csv_bytes([["FT1001", "Marlow", "Pad", "20.00"]]) + b'FT1002,Marlow,"Caliper, fro')
+    server = sftp()
+    supplier = fresh_supplier()
+    run = ingest(supplier, sftp_adapter_for(server, "/feed.csv"))
+    assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_FILE_TRUNCATED")
+    assert RawPart.objects.filter(supplier=supplier).count() == 1

@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import itertools
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -110,6 +111,23 @@ def detect_delimiter(header_line: str) -> str:
     return best if counts[best] else ","
 
 
+def _cut_short(text: str, cells: list[str], starts_on: int, columns: int, delimiter: str) -> str:
+    """Why the last record of a CSV looks cut off by a transfer, or "". Two signals only, because only they cannot be an
+    ordinary file: the text ends inside an open quote (a field that never closed), or the last record has fewer fields than
+    the header and no line break after it. A cut that leaves every column in place (`123.45` cut to `1`) has no signal: a valid
+    file may end without a newline, so it cannot be told from one (docs/feeds.md, known limits)."""
+    if len(cells) < columns and not text.endswith(("\r", "\n")):
+        return "it has fewer fields than the header and no line break after it"
+    tail = "".join(itertools.islice(io.StringIO(text, newline=""), starts_on - 1, None))
+    try:
+        for _ in csv.reader(io.StringIO(tail, newline=""), delimiter=delimiter, strict=True):
+            pass
+    except csv.Error as exc:
+        if "end of data" in str(exc):  # strict mode says this only at the end of the text, inside a quoted field
+            return "it ends inside a quoted field"
+    return ""
+
+
 class FileAdapter:
     """A CSV or XML file on disk. Also the parser behind the SFTP adapter once the file is downloaded."""
 
@@ -155,25 +173,44 @@ class FileAdapter:
             return
         delimiter = detect_delimiter(lines[0])
         self._notes["delimiter"] = delimiter
-        reader = csv.reader(io.StringIO("".join(lines), newline=""), delimiter=delimiter)
+        text = "".join(lines)
+        reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
         header = next(reader, None)
         if header is None:
             return
         header = [h.strip() for h in header]
         position = 0
+        read_to = reader.line_num  # lines consumed so far: the next record starts on the line after
+        held = None  # the record read last: only the FINAL one of a file can be one that a transfer cut short
         for cells in reader:
+            starts_on, read_to = read_to + 1, reader.line_num
             if not cells or all(c == "" for c in cells):
                 continue
             position += 1
-            if position <= start_after:
-                continue
-            raw_text = delimiter.join(cells)[:2000]
-            if len(cells) != len(header):
-                yield SourceRecord(position, {}, raw_text, reject="column_count")
-            elif any("�" in c for c in cells):
-                yield SourceRecord(position, {}, raw_text, reject="undecodable_bytes")
-            else:
-                yield SourceRecord(position, dict(zip(header, cells)), raw_text)
+            if held is not None:
+                yield from self._csv_row(*held, header, delimiter, start_after)
+            held = (position, cells, starts_on)
+        if held is not None:
+            position, cells, starts_on = held
+            why = _cut_short(text, cells, starts_on, len(header), delimiter)
+            if not why:
+                yield from self._csv_row(position, cells, starts_on, header, delimiter, start_after)
+            elif position > start_after:
+                # not stored, not rejected as one more odd row: a cut file must not end as a clean success (the same bytes
+                # arrive over SFTP, which reads the downloaded file through this adapter)
+                yield SourceGap(position, position, f"E_FILE_TRUNCATED: the file ends inside its last row ({why}), so that row is not stored")
+
+    @staticmethod
+    def _csv_row(position, cells, starts_on, header, delimiter, start_after) -> Iterator[SourceRecord]:
+        if position <= start_after:
+            return
+        raw_text = delimiter.join(cells)[:2000]
+        if len(cells) != len(header):
+            yield SourceRecord(position, {}, raw_text, reject="column_count")
+        elif any("�" in c for c in cells):
+            yield SourceRecord(position, {}, raw_text, reject="undecodable_bytes")
+        else:
+            yield SourceRecord(position, dict(zip(header, cells)), raw_text)
 
     def _xml(self, start_after: int) -> Iterator[SourceRecord | SourceGap]:
         depth = 0

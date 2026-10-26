@@ -510,6 +510,11 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F3: a feed cut inside its last row (an open quote, or fewer fields than the header and no line break) is a coded gap
+    D("adapters: a last row with fewer fields than the header and no line break is stored", "adapters", "_cut_short", "Lt -> GtE", "len(cells) < columns", R3),
+    D("adapters: a last row with a line break after it counts as cut", "adapters", "_cut_short", "remove `not`", "text.endswith", R3),
+    D("adapters: a file that ends inside a quoted field is stored", "adapters", "_cut_short", "In -> NotIn", '"end of data" in str(exc)', R3),
+    D("adapters: the cut last row is stored besides the gap", "adapters", "_csv", "negate the condition", "if not why:", R3),
     # F2: a total that moves during a walk is a coded gap, and the next run starts again instead of resuming over the shift
     D("paged: a total that moves during the walk is not noticed", "paged", "records", "NotEq -> Eq", "page_total != total", R3),
     D("paged: a total that moves is a gap that does not ask for a restart", "paged", "records", "True -> False", "restart=True", R3),
