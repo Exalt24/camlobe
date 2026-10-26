@@ -23,8 +23,8 @@ Two kinds of guard. `M(...)` replaces one piece of text by another (a hand-match
 reworded, and --check-targets then says so). `D(...)` DERIVES its edit: it names a function, a kind of change and a few
 words of the line to aim at, and tools/mutate_ast.py works the change out of the code's syntax tree (a negated condition,
 a swapped comparison, a deleted call). Reword the line and the aim still finds it; remove it and --check-targets says so.
-mutate_ast.py is found through $MUTATE_AST, or an `Operations/tools/mutate_ast.py` above this folder, and a derived guard
-without it is a usage error, never a silent pass.
+mutate_ast.py sits beside this file (tools/mutate_ast.py), so a fresh clone runs every guard with nothing else installed; $MUTATE_AST
+names another copy, used only when that one is missing. A derived guard without the tool is a usage error, never a silent pass.
     python tools/mutation_check.py                           every guard
 
 An argument it does not know is refused with exit 2 and nothing is edited. Exit 0 when every mutant was
@@ -118,9 +118,7 @@ def mutate_ast():
     global _mutate_ast
     if _mutate_ast is not None:
         return _mutate_ast
-    candidates = [os.environ.get("MUTATE_AST", "")]
-    candidates += [str(parent / "Operations" / "tools" / "mutate_ast.py") for parent in ROOT.parents]
-    candidates += ["C:/Projects/Professional/Operations/tools/mutate_ast.py"]
+    candidates = [str(ROOT / "tools" / "mutate_ast.py"), os.environ.get("MUTATE_AST", "")]  # the copy in this repository first
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             spec = importlib.util.spec_from_file_location("mutate_ast", candidate)
@@ -128,7 +126,7 @@ def mutate_ast():
             spec.loader.exec_module(module)
             _mutate_ast = module
             return module
-    print("a derived guard needs mutate_ast.py: set MUTATE_AST to its path", file=sys.stderr)
+    print("a derived guard needs tools/mutate_ast.py (or $MUTATE_AST): the file is missing", file=sys.stderr)
     sys.exit(2)
 
 
