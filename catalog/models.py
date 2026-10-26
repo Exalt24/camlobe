@@ -63,8 +63,8 @@ class FeedCheckpoint(models.Model):
     position = models.BigIntegerField(default=0)
     completed = models.BooleanField(default=False)
     completed_at = models.DateTimeField(null=True, blank=True)  # when the pass over the whole source finished
-    # the id of the run that began the pass in progress: a row's idempotency key holds it, so the key says "this row of THIS
-    # pass landed once", and a later pass that returns to an earlier price is a new version, not a row that already landed
+    # the id of the run that began the pass in progress, kept for the record. The idempotency key holds the run that WROTE a
+    # row, and whether a row is new is decided against the newest stored version of its part, never by a key that exists
     pass_id = models.BigIntegerField(default=0, db_default=0)
     updated_at = models.DateTimeField(auto_now=True)
     last_run = models.ForeignKey(PipelineRun, null=True, on_delete=models.SET_NULL, related_name="+")

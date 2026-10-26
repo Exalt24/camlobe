@@ -15,6 +15,7 @@ from catalog.models import Part, PipelineRun, RawPart, RejectedRow
 from catalog.normalize_step import normalize_pending
 
 from .helpers import get_supplier, row, write_csv
+from .test_scrape_pages import adapter_for, priced
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -107,10 +108,166 @@ def test_a_csv_with_a_part_twice_at_two_prices_keeps_the_first_across_batches(tm
 
 def test_a_scraped_part_listed_twice_at_two_prices_changes_nothing_on_the_next_two_walks():
     from .fakes import products_table
-    from .test_scrape_pages import adapter_for
 
     page = products_table([("DA1001", "Marlow", "Oil filter", "5.00"), ("DA1001", "Marlow", "Oil filter x10", "40.00"), ("DA1002", "Marlow", "Hose", "3.00")])
     supplier = fresh_supplier()
     out = [ingest(supplier, adapter_for(lambda url: (200, {}, page))) for _ in range(3)]
     assert [(r.status, r.rows_written, r.rows_rejected) for r in out] == [("succeeded", 2, 1), ("succeeded", 0, 1), ("succeeded", 0, 1)]
     assert versions(supplier, "DA1001") == [500]
+
+
+# ---- F1: a row is `unchanged` only when it equals the NEWEST stored version of its part -----------------------------------------
+# The class: "a key exists" treated as "this is the current value". A REST or SOAP source that is resumed inside one pass (a page
+# that fails, a run that dies) reads the same positions again; a price that goes 10.00, 12.00, 10.00 across those runs must end on
+# 10.00, and a row read again after a crash must still write nothing twice. The model below is the rule itself: for every row a
+# run read and committed, it is written when it differs from the newest version the model holds, and unchanged when it equals it.
+# REST and SOAP share the reader (PagedAdapter) and the file path is the one SFTP downloads into, so the tables cover all of them.
+
+from catalog.ingest.mapping import parse_cost_cents  # noqa: E402
+from catalog.ingest.paged import PagedAdapter, TransientError  # noqa: E402
+
+
+class Spy:
+    """Wraps an adapter: remembers every record it yielded, and can die (a dropped connection) after `die_after` of them."""
+
+    def __init__(self, inner, number_key, cost_key, die_after=None):
+        self.inner, self.number_key, self.cost_key, self.die_after = inner, number_key, cost_key, die_after
+        self.yielded: list[tuple[str, int]] = []
+
+    def __getattr__(self, name):  # source_ref, resumable, fingerprint, notes, secret_values
+        return getattr(self.inner, name)
+
+    def records(self, start_after=0):
+        for item in self.inner.records(start_after):
+            if isinstance(item, SourceRecord):
+                if self.die_after is not None and len(self.yielded) >= self.die_after:
+                    raise ConnectionError("the connection dropped")
+                self.yielded.append((item.fields[self.number_key], parse_cost_cents(item.fields[self.cost_key])))
+            yield item
+
+
+class Model:
+    """What the rule says: the newest version per part, and every version in order."""
+
+    def __init__(self):
+        self.newest: dict[str, int] = {}
+        self.history: dict[str, list[int]] = {}
+
+    def feed(self, committed):
+        written = unchanged = 0
+        for number, cents in committed:
+            if self.newest.get(number) == cents:
+                unchanged += 1
+            else:
+                self.newest[number] = cents
+                self.history.setdefault(number, []).append(cents)
+                written += 1
+        return written, unchanged
+
+    def check(self, supplier, run, written, unchanged):
+        assert (run.rows_written, run.rows_unchanged) == (written, unchanged)
+        for number, history in self.history.items():
+            assert versions(supplier, number) == history, number
+
+
+class Table(PagedAdapter):
+    """A paged source over a list of items, with some page offsets down (a gap, not a failed run)."""
+
+    def __init__(self, items, down=(), **kwargs):
+        super().__init__("table", page_size=2, max_retries=0, **kwargs)
+        self.items, self.down = items, set(down)
+
+    def fetch_page(self, offset, limit):
+        if offset in self.down:
+            raise TransientError("HTTP 500")
+        return self.items[offset : offset + limit], len(self.items)
+
+
+def table_items(prices):
+    return [{"sku": f"TB{i:04d}", "manufacturer": "Marlow", "title": "Oil filter", "price": price} for i, price in enumerate(prices)]
+
+
+COSTS = st.sampled_from(["10.00", "12.00", "9.50"])
+PAGED_RUN = st.tuples(
+    st.lists(COSTS, min_size=6, max_size=6),  # today's price of each of the six parts (three pages of two)
+    st.sets(st.sampled_from([0, 2, 4]), max_size=2),  # pages that answer 500 today
+    st.one_of(st.none(), st.integers(min_value=0, max_value=6)),  # the connection drops after this many rows
+)
+
+
+@given(st.lists(PAGED_RUN, min_size=2, max_size=6))
+@hyp_settings(max_examples=60, deadline=None)
+def test_a_paged_source_resumed_inside_one_pass_keeps_the_newest_price_whatever_the_prices_do(plan):
+    """REST and SOAP share this reader: partial runs, killed runs and full runs in any order, any prices."""
+    supplier, model = fresh_supplier(), Model()
+    for prices, down, die_after in plan:
+        spy = Spy(Table(table_items(prices), down), "sku", "price", die_after)
+        run = ingest(supplier, spy, batch_size=1)  # one row a batch: what was yielded before a drop is what was committed
+        model.check(supplier, run, *model.feed(spy.yielded))
+
+
+@pytest.mark.parametrize("prices", [("10.00", "12.00", "10.00"), ("10.00", "10.00", "12.00", "10.00"), ("12.00", "10.00", "12.00", "10.00", "12.00")])
+@pytest.mark.parametrize("kind", ["rest", "soap"])
+def test_rest_and_soap_resumed_after_a_page_that_keeps_failing_end_on_the_price_the_source_has_now(prices, kind):
+    """The adversary's case on the real adapters: page 2 answers 500 on every run, so every run is the same pass."""
+    from catalog.ingest.rest import RestAdapter
+    from catalog.ingest.soap import SoapAdapter
+
+    from .fakes import Behaviour, rest_server, soap_server
+
+    items = [{"sku": f"MF-H{i:04d}A", "manufacturer": "Marlow", "title": "Oil filter", "price": "5.00", "gtin": ""} for i in range(6)]
+    server = (rest_server if kind == "rest" else soap_server)(Behaviour(items, always={2: 500}))
+    try:
+        supplier = fresh_supplier()
+        for today in prices:
+            items[5]["price"] = today
+            if kind == "rest":
+                adapter = RestAdapter(f"http://127.0.0.1:{server.port}/catalog", page_size=2, max_retries=0)
+            else:
+                adapter = SoapAdapter(f"http://127.0.0.1:{server.port}/catalog?wsdl", page_size=2, max_retries=0)
+            run = ingest(supplier, adapter)
+            assert run.status == PipelineRun.Status.PARTIAL
+            assert versions(supplier, "MF-H0005A")[-1] == int(round(float(today) * 100)), today
+        expected = [prices[0]] + [b for a, b in zip(prices, prices[1:]) if a != b]
+        assert versions(supplier, "MF-H0005A") == [int(round(float(p) * 100)) for p in expected]
+    finally:
+        server.close()
+
+
+FILE_DAY = st.tuples(
+    st.lists(COSTS, min_size=6, max_size=6),
+    st.lists(st.integers(min_value=0, max_value=7), max_size=2),  # connections that drop after this many rows, before the run that finishes
+)
+
+
+@given(days=st.lists(FILE_DAY, min_size=2, max_size=5), batch_size=st.sampled_from([1, 3]))
+@hyp_settings(max_examples=30, deadline=None)
+def test_a_file_read_again_after_a_crash_writes_nothing_twice_whatever_the_prices_do_between_days(days, batch_size, tmp_path_factory):
+    """A killed run commits whole batches only, the run after it starts at the checkpoint, and a changed file is a new pass."""
+    supplier, model = fresh_supplier(), Model()
+    folder = tmp_path_factory.mktemp("o3days")
+    for prices, drops in days:
+        path = write_csv(folder / "feed.csv", [row(f"FD{i:04d}", cost=price) for i, price in enumerate(prices)])  # the same name every day
+        for after in drops:
+            spy = Spy(FileAdapter(path), "PartNo", "Cost", die_after=after)
+            run = ingest(supplier, spy, batch_size=batch_size)
+            committed = spy.yielded
+            if run.status == PipelineRun.Status.FAILED:
+                committed = spy.yielded[: len(spy.yielded) // batch_size * batch_size]
+            model.check(supplier, run, *model.feed(committed))
+        spy = Spy(FileAdapter(path), "PartNo", "Cost")
+        run = ingest(supplier, spy, batch_size=batch_size)
+        assert run.status == PipelineRun.Status.SUCCEEDED
+        model.check(supplier, run, *model.feed(spy.yielded))
+
+
+@given(st.lists(st.tuples(COSTS, st.booleans()), min_size=2, max_size=6))
+@hyp_settings(max_examples=25, deadline=None)
+def test_a_scraped_site_walked_again_after_a_partial_walk_keeps_the_newest_price(plan):
+
+    supplier, model = fresh_supplier(), Model()
+    for price, blocked in plan:
+        spy = Spy(adapter_for(priced(lambda: price, challenge=lambda: blocked)), "Part No", "Price")
+        run = ingest(supplier, spy)
+        assert run.status == (PipelineRun.Status.PARTIAL if blocked else PipelineRun.Status.SUCCEEDED)
+        model.check(supplier, run, *model.feed(spy.yielded))

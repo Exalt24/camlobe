@@ -215,16 +215,15 @@ MUTANTS: list[Mutant] = [
     M("runner: the checkpoint never advances", "runner", "FeedCheckpoint.objects.filter(pk=checkpoint.pk).update(position=advance_to, last_run=run)", "pass", INGEST),
     M("runner: a complete source is read again", "runner", "elif checkpoint.completed:", "elif False:", INGEST),
     M("runner: changed content does not restart the checkpoint", "runner", "if restart or checkpoint.fingerprint != fingerprint or (checkpoint.completed and not fingerprint):", "if False:", INGEST),
-    M("runner: an unchanged row is stored again", "runner", " or latest.get((row.part_number, row.brand)) == chash", "", INGEST),
     M("runner: the unchanged check ignores the brand", "runner",
       '.order_by("part_number_raw", "brand_raw", "-id")\n            .distinct("part_number_raw", "brand_raw")',
       '.order_by("part_number_raw", "-id")\n            .distinct("part_number_raw")', INGEST),
-    M("runner: a seen idempotency key is stored again", "runner", "if key in seen_keys or ", "if False or ", INGEST),
+    D("runner: an unchanged row is stored again", "runner", "_store_batch", "Eq -> NotEq", "latest.get(", INGEST, R3),
     M("runner: rows before a gap do not move the checkpoint", "runner", "flush()  # what was read before the gap is whole, so it moves the checkpoint", "pass", REMOTE),
     M("runner: the checkpoint moves past a gap", "runner", "advance = contiguous and not batch.had_gap", "advance = True", INGEST, REMOTE),
     M("runner: a gap does not make the run partial", "runner", "    if gap_seen:\n        return finish_run(run, PipelineRun.Status.PARTIAL)", "    if False:\n        return finish_run(run, PipelineRun.Status.PARTIAL)", INGEST, REMOTE),
     M("runner: counts are not saved with the batch", "runner", "PipelineRun.objects.filter(pk=run.pk).update(**counts)", "pass", INGEST),
-    M("runner: a batch is not one transaction", "runner", "    with transaction.atomic():\n        seen_keys", "    if True:\n        seen_keys", INGEST),
+    M("runner: a batch is not one transaction", "runner", "    with transaction.atomic():\n        latest = {", "    if True:\n        latest = {", INGEST),
     M("runs: a run left running by a dead process is not closed", "runs", "stale.update(", "stale.none().update(", INGEST),
     M("runs: the advisory lock is not enforced", "runs", "if not cursor.fetchone()[0]:", "if False:", INGEST),
     # ---- paged sources -----------------------------------------------------------------------------------
@@ -459,7 +458,7 @@ MUTANTS: list[Mutant] = [
     D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
     # ---- second output round (derived from the syntax tree) ----------------------------------------------------------------------------------
     # F1: a row is unchanged only when it matches the NEWEST stored version; its key says "this row of THIS pass landed once"
-    D("mapping: a key does not tell one pass from the next", "mapping", "idempotency_key", "negate the condition", "if pass_id:", INGEST, PAGES),
+    D("mapping: a key does not tell one run from the next", "mapping", "idempotency_key", "negate the condition", "if run_id:", R3),
     # F2: a pass that has not finished never replaces the latest completed pass
     D("runner: a finished pass does not promote what it read", "runner", "_ingest_locked", "delete the call statement", ".update(staging=False)", DELIST),
     D("snapshot: the match step reads a pass that has not finished", "snapshot", "seen_listing_keys", "False -> True", "staging=False", DELIST),
