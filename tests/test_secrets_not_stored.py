@@ -284,6 +284,15 @@ def test_the_first_half_of_a_proxy_password_with_a_backslash_is_not_left_in_the_
     assert "Zq9pass" not in out and "word77" not in out and "camuser" not in out and "InvalidURL" in out
 
 
+def test_a_proxy_password_that_holds_an_at_sign_is_read_up_to_the_last_at_sign():
+    """Pinned by hand: the property tests below only find an at sign in a password when Hypothesis happens to draw one, and the guard for this line survived one full run that way."""
+    url = "http://camuser:Zq9@pass77@127.0.0.1:99999"
+    secrets = userinfo_secrets(url)
+    assert secrets[1] == "Zq9@pass77" and "camuser" in secrets
+    out = Redactor(secrets).text(real_error_text(url))
+    assert "pass77" not in out and "Zq9" not in out and "camuser" not in out
+
+
 @given(SECRET_TEXT)
 @settings(max_examples=60, deadline=None)
 def test_no_piece_of_a_secret_a_library_cuts_it_into_survives_in_the_real_error_text_of_a_malformed_proxy(secret):

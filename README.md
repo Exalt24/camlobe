@@ -86,13 +86,13 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 954 tests, needs Postgres on 5434 and Meilisearch on 7701
+python -m pytest tests/ -o addopts=""      # 955 tests, needs Postgres on 5434 and Meilisearch on 7701
 python tools/mutation_check.py             # 296 guards, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and CI starts both.
 
-- 954 tests, all passing in a run on 2026-10-26 after the second scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)); 686 passed after the first ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)), 597 after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
+- 955 tests: 954 passed in a run on 2026-10-26 after the second scraper output round, then one test was added that pins the proxy password with an at sign, since a full guard run showed the property tests only drew one by chance ([output](docs/test-runs/2026-10-26-pytest-after-second-round.txt)); 686 passed after the first ([output](docs/test-runs/2026-10-26-pytest-after-output-round.txt)), 597 after the second review ([output](docs/test-runs/2026-10-26-pytest-after-review.txt)), 442 earlier that day ([output](docs/test-runs/2026-10-26-pytest.txt)) and 435 on 2026-10-25 ([output](docs/test-runs/2026-10-25-pytest.txt)).
 - Every rule has a test in both directions: the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures in every stage, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
