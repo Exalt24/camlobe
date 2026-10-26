@@ -86,7 +86,7 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 1,023 tests, about 8 minutes, needs Postgres on 5434 and Meilisearch on 7701
+python -m pytest tests/ -o addopts=""      # 1,025 tests (1,023 in the last full run, two link guard tests came after), about 8 minutes, needs Postgres on 5434 and Meilisearch on 7701
 python tools/mutation_check.py             # 323 guards, about 20 minutes, edits source in place: run it in a copy (--help)
 ```
 
