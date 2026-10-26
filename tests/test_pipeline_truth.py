@@ -93,7 +93,7 @@ def test_the_parts_do_not_depend_on_the_order_the_feeds_arrive_in(feeds):
 def test_messy_rows_are_rejected_with_reasons_and_the_review_queue_has_the_ambiguous_ones(feeds):
     run_pipeline(feeds, ORDER_A)
     reasons = set(RejectedRow.objects.values_list("reason", flat=True))
-    assert reasons == {"blank_part_number", "bad_cost", "undecodable_bytes"}
+    assert reasons == {"blank_part_number", "bad_cost", "undecodable_bytes", "duplicate_part"}  # the repeated row with a new price
     queue = defaultdict(int)
     for reason in ReviewItem.objects.values_list("reason", flat=True):
         queue[reason] += 1

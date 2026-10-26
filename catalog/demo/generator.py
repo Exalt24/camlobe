@@ -6,7 +6,8 @@ faults. A truth file records which canonical part every written row stands for, 
 the pipeline's grouping against it instead of against itself.
 
   redline  CSV, windows-1252 with a few UTF-8 lines and a few undecodable bytes, exact duplicate rows,
-           a repeated row with a new price, blank part numbers, "N/A" costs.
+           a repeated row with a new price (refused as duplicate_part: the first row of a part wins), blank part
+           numbers, "N/A" costs.
   harbor   XML, brand missing on some items, zero padded numbers, two items that reuse another part's
            GTIN (a renumbered part) and one that carries a GTIN that disagrees with the first.
   delta    three CSV files with a BOM: the base file, then the same columns in another order with some

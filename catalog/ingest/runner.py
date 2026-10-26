@@ -14,6 +14,8 @@ completes, so a pass that ends partial leaves the last completed pass (and its s
 """
 from __future__ import annotations
 
+import hashlib
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -36,6 +38,7 @@ from .redact import Redactor
 
 # rejections that say nothing about WHICH part the row was: a pass holding one cannot prove what is missing
 UNREADABLE = frozenset({"column_count", "undecodable_bytes", "nul_character"})
+DUPLICATE_PART = "duplicate_part"  # the part is in the pass already with other content: only the first row of the run counts
 NUL = chr(0)
 
 
@@ -91,13 +94,14 @@ def _ingest_locked(
     contiguous = True
     gap_seen = False
     batch = _Batch()
+    first_seen: dict[int, int] = {}  # part -> the content of its first row in THIS run (see DUPLICATE_PART)
 
     def flush() -> None:
         if not batch.records:
             return
         advance = contiguous and not batch.had_gap
         last = batch.records[-1].position
-        _store_batch(supplier, run, checkpoint, batch.records, headers, advance_to=last if advance else None)
+        _store_batch(supplier, run, checkpoint, batch.records, headers, last if advance else None, first_seen)
         batch.records.clear()
         batch.had_gap = False
 
@@ -133,6 +137,11 @@ def _ingest_locked(
     return finish_run(run, PipelineRun.Status.SUCCEEDED)
 
 
+def _part_id(number: str, brand: str) -> int:
+    """A compact stand-in for (number, brand) as a key of the first occurrence table: 8 bytes, not two strings."""
+    return int.from_bytes(hashlib.blake2b(f"{number}\x1f{brand}".encode("utf-8"), digest_size=8).digest(), "big")
+
+
 def _store_batch(
     supplier: Supplier,
     run: PipelineRun,
@@ -140,6 +149,7 @@ def _store_batch(
     records: list[SourceRecord],
     headers: dict[str, None],
     advance_to: int | None,
+    first_seen: dict[int, int],
 ) -> None:
     mapping = resolve_headers(headers) if headers else {}
     if headers:
@@ -155,11 +165,19 @@ def _store_batch(
         # a NUL cannot be stored in a text or JSON column: that row is refused, never the whole run
         if not reason and any(NUL in value for value in rec.fields.values()):
             reason = "nul_character"
+        chash = ""
         if not reason:
             try:
                 row = map_row(rec.fields, mapping)
             except RowRejected as exc:
                 reason = exc.reason
+            else:
+                # the same part twice in one source (a single and a 10 pack under one number): the FIRST row of the run is the
+                # part's row, a later one that differs is refused here and visibly, because storing both would write a new
+                # version on every run as the two take turns being the newest
+                chash = content_hash(row)
+                if first_seen.setdefault(_part_id(row.part_number, row.brand), int(chash[:16], 16)) != int(chash[:16], 16):
+                    reason = DUPLICATE_PART
         if reason:
             rejected.append(
                 RejectedRow(run=run, supplier=supplier, position=rec.position, reason=reason, raw=rec.raw_text.replace(NUL, "�"))
@@ -169,7 +187,7 @@ def _store_batch(
             elif (identity := row_identity(rec.fields, mapping)) is not None:
                 seen.add(identity)
         else:
-            mapped.append((rec, row, content_hash(row)))
+            mapped.append((rec, row, chash))
             seen.add((row.part_number, row.brand))
             for name, header in row.picked.items():
                 counts = run.notes.setdefault("column_choices", {}).setdefault(name, {})

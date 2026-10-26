@@ -272,8 +272,8 @@ def test_the_adapter_reports_a_gap_and_the_run_is_partial_and_resumable(tmp_path
 
 
 def test_rereading_rows_after_a_gap_does_not_store_a_row_twice():
-    """The checkpoint stops at a gap, so the rows after it are read again. Their idempotency keys stop them landing twice,
-    even when the part has two versions after the gap and the latest stored one is not the row being re-read."""
+    """The checkpoint stops at a gap, so the rows after it are read again. They land once, and a part listed twice after the
+    gap (6.00 at row 25, 7.00 at row 28) keeps its first row in every run: the later one is refused as a duplicate."""
     s = get_supplier()
 
     class AfterGap:
@@ -303,8 +303,9 @@ def test_rereading_rows_after_a_gap_does_not_store_a_row_twice():
     ingest(s, AfterGap(fixed=False), batch_size=5)
     again = ingest(s, AfterGap(fixed=True), batch_size=5)
     assert again.status == PipelineRun.Status.SUCCEEDED
-    assert RawPart.objects.filter(part_number_raw="AB9999").count() == 2  # one row per version, not four
-    assert list(RawPart.objects.filter(part_number_raw="AB9999").order_by("id").values_list("cost_cents", flat=True)) == [600, 700]
+    assert list(RawPart.objects.filter(part_number_raw="AB9999").order_by("id").values_list("cost_cents", flat=True)) == [600]
+    assert RawPart.objects.count() == 29  # 30 rows, the refused one is not stored, none landed twice
+    assert RejectedRow.objects.filter(reason="duplicate_part").count() == 2  # row 28, in each of the two runs
 
 
 def test_a_live_source_with_no_fingerprint_is_read_again_each_time():

@@ -171,6 +171,7 @@ DELIST = "tests/test_delisting.py"
 SCRAPE = "tests/test_scrape.py"
 SECRETS = "tests/test_secrets_not_stored.py"
 PAGES = "tests/test_scrape_pages.py"
+R3 = "tests/test_output_round_3.py"
 
 MUTANTS: list[Mutant] = [
     # ---- part number, brand and GTIN normalisation ------------------------------------------------
@@ -507,6 +508,9 @@ MUTANTS: list[Mutant] = [
     D("redact: the userinfo of a proxy URL ends before its last @", "redact", "userinfo_secrets", "1 -> 2", 'rsplit("@", 1)', SECRETS),
     # F11: rel is a set of case insensitive tokens (aimed at the default selector; a weaker guard than the others, see the README)
     D("scrape: the default next selector matches nothing", "scrape", "default_next_selector", "string", 'return "a[rel~=next i]"', PAGES),
+    # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
+    # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
+    D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
 ]
 
 
