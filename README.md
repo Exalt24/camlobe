@@ -87,7 +87,7 @@ Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/pa
 
 ```bash
 python -m pytest tests/ -o addopts=""      # 1,023 tests, about 8 minutes, needs Postgres on 5434 and Meilisearch on 7701
-python tools/mutation_check.py             # 296 guards, about 30 minutes, edits source in place: run it in a copy (--help)
+python tools/mutation_check.py             # 323 guards, about 20 minutes, edits source in place: run it in a copy (--help)
 ```
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and the CI workflow starts both (it has not run yet: see the register).
@@ -96,7 +96,7 @@ The database tests use the compose Postgres and create their own `test_camlobe` 
 - The part number, matching and mapping rules have tests for the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures, and the two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness: 296 guards, 64 of them with the edit derived from the syntax tree by `tools/mutate_ast.py` (in the repository) and 232 matched as text. On 2026-10-25 all 144 then in the harness were killed ([output](docs/test-runs/2026-10-25-mutation.txt)). After the second review the 234 then in the harness were run in three parts and killed ([output](docs/test-runs/2026-10-26-mutation-after-review.txt)): one survivor in the first part was a test too weak to tell the guard, and the docs guards were run again after a redundant branch was removed. After the second output round the writer killed all 295 then in the harness in a copy of the repository in 1,822 s ([output](docs/test-runs/2026-10-26-mutation-second-round-295.txt)). A full run of all 296 by someone else in a copy killed 295 and let one survive (the proxy password guard, which relied on Hypothesis drawing an at sign); a hand written test now kills it ([output](docs/test-runs/2026-10-26-mutation-lead-full-run.txt)). Two guards are weaker than the rest: the one for the rel token only empties the default selector, and the SOCKS one is a text pair on `requirements.txt`, which `mutate_ast.py` cannot edit.
+- Mutation harness (`tools/mutation_check.py`, 323 guards, edits source in place so run it in a copy): all 323 were killed in a full run by someone else on 2026-10-26 after the third scraper output round, in 1,037 s ([output](docs/test-runs/2026-10-26-mutation-full-after-third-round.txt)). 93 derive their edit from the syntax tree with `tools/mutate_ast.py` and 230 are text pairs. The history of earlier runs, a survivor that a hand written test now kills, and the two weaker guards: [docs/MUTATION.md](docs/MUTATION.md).
 
 ## Register: what ran and what did not
 
