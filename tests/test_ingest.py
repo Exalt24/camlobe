@@ -390,6 +390,17 @@ def dsn() -> str:
     return f"host={d['HOST']} port={d['PORT']} dbname={connection.settings_dict['NAME']} user={d['USER']} password={d['PASSWORD']}"
 
 
+def wait_until_the_killed_process_has_no_database_session() -> None:
+    """A killed client's server session can still be finishing a COMMIT it had already sent, or holding its advisory lock, for a moment: reading the checkpoint and the rows before it ends can see two different commits, and the rerun can meet AlreadyRunning."""
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        with connection.cursor() as cur:
+            cur.execute("select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()")
+            if cur.fetchone()[0] == 0:
+                return
+        time.sleep(0.05)
+
+
 def test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes(tmp_path):
     s = get_supplier()
     path = write_csv(tmp_path / "big.csv", [row(f"AB{i:05d}", cost=f"{i % 90 + 1}.00") for i in range(6000)])
@@ -406,6 +417,7 @@ def test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_f
         time.sleep(0.05)
     proc.kill()
     proc.wait()
+    wait_until_the_killed_process_has_no_database_session()
     cp = FeedCheckpoint.objects.get(supplier=s)
     stored = RawPart.objects.filter(supplier=s).count()
     assert 100 <= cp.position < 6000 and not cp.completed, "the process finished before it was killed"
