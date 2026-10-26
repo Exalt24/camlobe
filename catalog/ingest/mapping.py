@@ -8,7 +8,9 @@ whole feed into unbranded rows without a single error.
 Two columns for one REQUIRED field (SKU and MPN both read as the part number) are still refused: which one is
 the supplier's number is a decision, not a default. Two columns for an OPTIONAL field are ordinary (UPC and EAN
 side by side): a row takes the first valid GTIN in header order, and the first non empty description, and the run
-notes say which columns were used and how often.
+notes say which columns were used and how often. The same header text twice counts as two columns for that field
+(`unique_headers` names the second `Cost [duplicate 2]`), so a doubled required column is refused too, and a doubled column that
+maps to nothing is listed as unmapped.
 """
 from __future__ import annotations
 
@@ -41,6 +43,21 @@ def header_key(header: str) -> str:
     return re.sub(r"[^a-z0-9]", "", header.lower())
 
 
+_DUPLICATE = re.compile(r"(.+) \[duplicate \d+\]")
+
+
+def unique_headers(names: list[str]) -> list[str]:
+    """The header of a CSV or a scraped table with the same text twice, named so that no column is lost: the second `Cost` is
+    `Cost [duplicate 2]`. A dict built from the raw header would keep only the right most one and not even list the other as
+    unmapped. A blank header is not a named column and stays as it is."""
+    seen: dict[str, int] = {}
+    out = []
+    for name in names:
+        seen[name] = seen.get(name, 0) + 1
+        out.append(name if not name or seen[name] == 1 else f"{name} [duplicate {seen[name]}]")
+    return out
+
+
 def resolve_headers(headers: Iterable[str]) -> dict[str, str | tuple[str, ...]]:
     """canonical field -> the header that carries it (a tuple, in header order, for a doubled optional field).
 
@@ -50,7 +67,8 @@ def resolve_headers(headers: Iterable[str]) -> dict[str, str | tuple[str, ...]]:
     ordered = sorted(headers) if isinstance(headers, (set, frozenset)) else list(dict.fromkeys(headers))
     found: dict[str, list[str]] = {}
     for header in ordered:
-        key = header_key(header)
+        named = _DUPLICATE.fullmatch(header)  # a second column with the same header text means what the first one means
+        key = header_key(named.group(1) if named else header)
         for field, aliases in FIELD_ALIASES.items():
             if key in aliases:
                 found.setdefault(field, []).append(header)

@@ -510,6 +510,10 @@ MUTANTS: list[Mutant] = [
     # ---- third output round (derived from the syntax tree) -----------------------------------------------------------------------------------
     # F8: the same part twice in one source at two prices: the first row of the run is the part's row, a later differing one is refused
     D("runner: a later row of a part listed twice with other content is stored", "runner", "_store_batch", "NotEq -> Eq", "first_seen.setdefault", R3, INGEST),
+    # F4: the same header text twice is two columns (refused for a required field, read by the rule for an optional one, listed when unmapped)
+    D("mapping: the same header text twice is one column again", "mapping", "unique_headers", "Eq -> NotEq", "seen[name] == 1", R3),
+    D("mapping: a second column with the same header text means nothing", "mapping", "resolve_headers", "negate the condition", "named.group(1)", R3),
+    D("mapping: a blank header is numbered like a named one", "mapping", "unique_headers", "negate the condition", "if not name or", R3),
     # F3: a feed cut inside its last row (an open quote, or fewer fields than the header and no line break) is a coded gap
     D("adapters: a last row with fewer fields than the header and no line break is stored", "adapters", "_cut_short", "Lt -> GtE", "len(cells) < columns", R3),
     D("adapters: a last row with a line break after it counts as cut", "adapters", "_cut_short", "remove `not`", "text.endswith", R3),

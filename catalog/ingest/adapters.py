@@ -17,6 +17,8 @@ from typing import Iterator, Protocol
 
 from defusedxml.ElementTree import iterparse
 
+from .mapping import unique_headers
+
 
 @dataclass(frozen=True)
 class SourceRecord:
@@ -178,7 +180,7 @@ class FileAdapter:
         header = next(reader, None)
         if header is None:
             return
-        header = [h.strip() for h in header]
+        header = unique_headers([h.strip() for h in header])  # the same header text twice is two columns, never one
         position = 0
         read_to = reader.line_num  # lines consumed so far: the next record starts on the line after
         held = None  # the record read last: only the FINAL one of a file can be one that a transfer cut short

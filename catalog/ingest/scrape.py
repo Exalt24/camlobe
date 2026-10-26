@@ -55,6 +55,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .adapters import SourceGap, SourceRecord
+from .mapping import unique_headers
 from .paged import FatalError
 from .redact import identity_url, query_values, userinfo_secrets
 from .rest import _retry_after
@@ -474,6 +475,7 @@ class ScrapeAdapter:
         for cell in ScrapeAdapter._cells(header_tr):
             text = cell.get_text(" ", strip=True)
             header.extend([text, *[f"{text} ({n})" if text else "" for n in range(2, ScrapeAdapter._span(cell) + 1)]])
+        header = unique_headers(header)  # the same header text twice is two columns, never one
         body = [tr for tr in own if tr.parent.name == "tbody"] or [tr for tr in own if tr is not header_tr and tr.parent.name != "thead"]
         rows = []
         for tr in body:

@@ -487,3 +487,84 @@ def test_the_same_cut_file_arriving_over_sftp_is_partial_too(sftp, tmp_path):
     run = ingest(supplier, sftp_adapter_for(server, "/feed.csv"))
     assert run.status == PipelineRun.Status.PARTIAL and run.errors[0]["message"].startswith("E_FILE_TRUNCATED")
     assert RawPart.objects.filter(supplier=supplier).count() == 1
+
+
+# ---- F4: two columns with the same header text -----------------------------------------------------------------------------------
+# Rule: the same header text twice is two columns. For a REQUIRED field it is refused like two aliases of one field
+# (SchemaDriftError, nothing stored); for an optional field both columns are read (the first non empty value wins, as with UPC
+# and EAN); a doubled column that maps to nothing is listed in the run's unmapped columns, the second one as `Name [duplicate 2]`.
+# A dict built from the header collapsed them to the right most column and listed nothing.
+
+BASE_HEADER = ["PartNo", "Mfr", "Description", "Cost", "Notes"]
+REQUIRED_HEADERS = {"PartNo", "Mfr", "Cost"}
+
+
+def doubled_table(which, after, blank_first):
+    """The header with column `which` written twice (the copy right after it, or at the far end), and one row of data whose two
+    copies disagree, so a silent collapse changes what is stored."""
+    header = list(BASE_HEADER)
+    index = header.index(which)
+    header.insert(index + 1 if after else len(header), which)
+    values = {"PartNo": "FT1001", "Mfr": "Marlow", "Description": "Pad", "Cost": "20.00", "Notes": "n"}
+    other = {"PartNo": "FT9999", "Mfr": "Tarn", "Description": "Rotor", "Cost": "15.00", "Notes": "m"}
+    first, second = ("", other[which]) if blank_first and which == "Description" else (values[which], other[which])
+    row_cells, seen_original = [], False
+    for name in header:
+        if name == which:
+            row_cells.append(first if not seen_original else second)
+            seen_original = True
+        else:
+            row_cells.append(values[name])
+    return header, row_cells
+
+
+DOUBLE = st.tuples(st.sampled_from(BASE_HEADER), st.booleans(), st.booleans())
+
+
+def check_doubled(which, run, supplier, blank_first):
+    if which in REQUIRED_HEADERS:
+        assert run.status == PipelineRun.Status.FAILED and "more than one column maps to the same field" in run.errors[0]["message"]
+        assert RawPart.objects.filter(supplier=supplier).count() == 0
+        return
+    assert run.status == PipelineRun.Status.SUCCEEDED and run.rows_written == 1
+    if which == "Description":
+        assert RawPart.objects.get(supplier=supplier).description_raw == ("Rotor" if blank_first else "Pad")  # first non empty, left to right
+        assert run.notes["doubled_columns"] == {"description": ["Description", "Description [duplicate 2]"]}
+    else:
+        assert run.notes["unmapped_columns"] == ["Notes", "Notes [duplicate 2]"]  # nothing is silently dropped
+
+
+@given(case=DOUBLE)
+@hyp_settings(max_examples=40, deadline=None)
+def test_a_csv_with_one_header_written_twice_is_refused_or_read_by_the_rule_never_collapsed(case, tmp_path_factory):
+    which, after, blank_first = case
+    header, cells = doubled_table(which, after, blank_first)
+    path = tmp_path_factory.mktemp("o3dup") / "feed.csv"
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(header)
+    writer.writerow(cells)
+    path.write_bytes(buf.getvalue().encode("utf-8"))
+    supplier = fresh_supplier()
+    check_doubled(which, ingest(supplier, FileAdapter(path)), supplier, blank_first)
+
+
+@given(case=DOUBLE)
+@hyp_settings(max_examples=25, deadline=None)
+def test_a_scraped_table_with_one_header_written_twice_is_refused_or_read_by_the_rule_never_collapsed(case):
+    from .fakes import products_table
+
+    which, after, blank_first = case
+    header, cells = doubled_table(which, after, blank_first)
+    page = products_table([tuple(cells)], header=tuple(header))
+    supplier = fresh_supplier()
+    check_doubled(which, ingest(supplier, adapter_for(lambda url: (200, {}, page))), supplier, blank_first)
+
+
+def test_two_different_aliases_of_one_field_are_still_refused_and_a_plain_header_is_not():
+    from catalog.ingest.mapping import SchemaDriftError, resolve_headers, unique_headers
+
+    with pytest.raises(SchemaDriftError):
+        resolve_headers(["PartNo", "Mfr", "Cost", "Unit Cost"])
+    assert unique_headers(["a", "b", "a", "", "", "a"]) == ["a", "b", "a [duplicate 2]", "", "", "a [duplicate 3]"]
+    assert resolve_headers(unique_headers(["PartNo", "Mfr", "Cost", ""])) == {"part_number": "PartNo", "brand": "Mfr", "cost": "Cost"}
