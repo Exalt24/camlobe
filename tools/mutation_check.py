@@ -173,6 +173,12 @@ SECRETS = "tests/test_secrets_not_stored.py"
 PAGES = "tests/test_scrape_pages.py"
 R3 = "tests/test_output_round_3.py"
 
+# the requirement line is read from requirements.txt, never typed here, so a Dependabot bump of its version cannot make this guard lose its text
+_SOCKS_REQUIREMENT = next(
+    (line.strip() for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").replace("\r\n", "\n").split("\n") if line.strip().startswith("requests[socks]")),
+    "requests[socks]",
+)
+
 MUTANTS: list[Mutant] = [
     # ---- part number, brand and GTIN normalisation ------------------------------------------------
     M("normalize: no unicode fold", "normalize", 'text = _fold(raw or "")', 'text = raw or ""', NORM),
@@ -497,7 +503,7 @@ MUTANTS: list[Mutant] = [
     D("rest: a Retry-After date of an unknown zone is read as local time", "rest", "_retry_after", "negate the condition", "if when.tzinfo is None", REMOTE),
     D("soap: the Retry-After of a throttled answer is not remembered", "soap", "post", "negate the condition", "response.status_code >= 429", REMOTE),
     # F10: a proxy scheme the config accepts needs its dependency (requirements.txt is not Python: the one guard that is a text pair)
-    M("requirements: the SOCKS support of requests is not installed", "requirements", "requests[socks]>=2.32,<3", "requests>=2.32,<3", SCRAPE),
+    M("requirements: the SOCKS support of requests is not installed", "requirements", _SOCKS_REQUIREMENT, _SOCKS_REQUIREMENT.replace("[socks]", "", 1), SCRAPE),
     # F14: a cell holding two amounts is rejected, never glued into one
     D("mapping: a cell with two dollar signs is read as one amount", "mapping", "parse_cost_cents", "negate the condition", 'text.count("$") > 1', MAP, PAGES),
     D("mapping: digits split by spaces are glued into one amount", "mapping", "parse_cost_cents", "negate the condition", "and not re.fullmatch", MAP, PAGES),
