@@ -4,15 +4,19 @@
 
 ![A terminal replay of the real command output: three sample suppliers ingested, one feed refused for a renamed column, 19,098 parts matched, a second pass that changes nothing](docs/demo.gif)
 
-*Replayed from the output of `python manage.py run_demo --brief` ([captured text](docs/demo-captured.txt)); the word REFUSED and its reason are fixed text in that view for any failed file. Everything in it runs on generated sample data in a local database.*
+*Replayed from the output of `python manage.py run_demo --brief` ([captured text](docs/demo-captured.txt)).*
 
-A Django and PostgreSQL pipeline that ingests auto parts catalogs from several suppliers' feeds, normalises part numbers, matches the same part across suppliers without guessing, and serves the result through REST and a Meilisearch index.
+*The word REFUSED and its reason are fixed text in that view for any failed file. Everything in it runs on generated sample data in a local database.*
 
-On 20,000 generated parts, 40,008 stored feed rows from three suppliers became 19,098 parts, 14,106 of them listed by two or more suppliers. A second pass wrote nothing new (five sources are skipped on a matching content hash, and the row level case is tested) ([run output](docs/test-runs/2026-10-25-run-demo-20k.txt)). At 2,500 parts a test (`tests/test_pipeline_truth.py`) finds no part merged wrongly or split against the generator's own truth file; the 20,000 part run reports counts only.
+A Django and PostgreSQL pipeline that ingests auto parts catalogs from several suppliers' feeds and matches the same part across them without guessing.
+
+It normalises part numbers first, and serves the result through REST and a Meilisearch index.
+
+On 20,000 generated parts, 40,008 stored feed rows from three suppliers became 19,098 parts. 14,106 of them are listed by two or more suppliers. A second pass wrote nothing new. Five sources are skipped on a matching content hash, and the row level case is tested ([run output](docs/test-runs/2026-10-25-run-demo-20k.txt)). At 2,500 parts a test (`tests/test_pipeline_truth.py`) finds no part merged wrongly or split against the generator's own truth file. The 20,000 part run reports counts only.
 
 ## What it is and why it exists
 
-A parts distributor sends a catalog in whatever shape its export tool produces: the same part as `MF-H4123A`, `h 4123 a` or `0000451233`, a brand spelled four ways, a column that is renamed in the middle of the month, a file in two encodings. The pipeline has to keep what was received, turn it into one canonical catalog, and be safe to run again after a crash. This repository is that pipeline running on a data generator I wrote, since a supplier's own feed cannot be published.
+A parts distributor sends a catalog in whatever shape its export tool produces. The same part can arrive as `MF-H4123A`, `h 4123 a` or `0000451233`. A brand can be spelled four ways. A column can be renamed in the middle of the month, and a file can come in two encodings. The pipeline has to keep what was received, turn it into one canonical catalog, and be safe to run again after a crash. This repository is that pipeline running on a data generator I wrote, since a supplier's own feed cannot be published.
 
 Three sample suppliers, each with its own faults, feed one universe of parts:
 
@@ -46,7 +50,7 @@ flowchart LR
 | Serve | `runserver` | search, part detail with sources and fitment, vehicle fitment, run status ([API](docs/api.md)) |
 | Orders | `edi_po`, `edi_parse` | an X12 850 built from a supplier's own part numbers, and readers for 855, 856 and 810 ([EDI](docs/edi.md)) |
 
-Feed adapters (local file, SFTP, paged REST with rate limit and retry, SOAP, and an HTTP scraper for a site with a login) sit behind one interface: [feeds](docs/feeds.md). The scraper was tested against a local fake site only: see Limits.
+Feed adapters sit behind one interface: [feeds](docs/feeds.md). They are a local file, SFTP, paged REST with rate limit and retry, SOAP, and an HTTP scraper for a site with a login. The scraper was tested against a local fake site only: see Limits.
 
 ## Measured
 
@@ -57,15 +61,15 @@ Windows 11 desktop, Docker Postgres 17 on localhost, one process. Counts and tim
 | 20,000 parts ([output](docs/test-runs/2026-10-25-run-demo-20k.txt), same counts again after two fixes: [output](docs/test-runs/2026-10-26-run-demo-20k.txt), and after the review fixes below: [output](docs/test-runs/2026-10-26-run-demo-20k-after-review.txt)) | 40,008 | 19,098 | 14,106 | 500 | 1.1 to 2.0 s | 3.3 s | 11.0 s |
 | 100,000 parts ([output](docs/test-runs/2026-10-25-run-demo-100k.txt)) | 199,886 | 95,345 | 70,468 | 2,518 | 5.2 to 11.4 s | 20.0 s | 65.7 s |
 
-`python manage.py check_query_plans` runs `EXPLAIN ANALYZE` on the queries the pipeline and API depend on and fails when one stops using its index. At 20,000 parts the checked queries (eight in the captured demo, nine in the later runs) each took under 3 ms.
+`python manage.py check_query_plans` runs `EXPLAIN ANALYZE` on the queries the pipeline and API depend on. It fails when one stops using its index. At 20,000 parts the checked queries (eight in the captured demo, nine in the later runs) each took under 3 ms.
 
 ## What was hard
 
-- **A search setting that hid new parts.** Turning typo tolerance off for part numbers only, per attribute, worked on the first build and made every part number added afterwards unfindable on Meilisearch 1.12.8. The sync test `test_a_part_added_after_the_build_is_found_by_its_number` caught it (commit 652e08a). Typo tolerance is now off for the whole index, which also costs typo tolerance on description words.
-- **Rows re read after a gap.** A paged source whose page 2 fails keeps its checkpoint at the gap, so the pages after it are read again on the next run. A row is unchanged only when it equals the newest stored version of its part (a key that exists proves nothing about that), and the generated tests in `tests/test_output_round_3.py` pin it over price sequences, partial runs and killed runs of the file, REST, SOAP and scraper readers, beside `test_rereading_rows_after_a_gap_does_not_store_a_row_twice`.
-- **A mutation harness that edited nothing.** Two guards that span several lines in files with CRLF line endings were never edited, so their mutants were reported as survivors that were not real. The harness now matches on LF text and refuses to report a mutation that changed nothing. <!-- NEG-OK: bug story -->
-- **A search that missed a quarter of the numbers a supplier prints.** A reviewer who had not seen the code sampled 400 supplier-written numbers from the generator's truth file and 125 found nothing on either backend: the query was normalised with no brand, so `DU-ZR7208` kept its prefix and a Kestrel number lost its real leading zero. A query is now tried in every form a supplier might print (as typed, with no brand, with each brand's rules), against both backends through one function, and the same 400 give 0 misses on both.
-- **A guard that did nothing.** One mutant survived because the guard it removed was redundant with the line after it (`indexed_version` is set to the version that was sent, so a part edited mid send stays behind anyway). The dead condition was removed and a mutant for the real defect was added.
+- **A search setting that hid new parts.** Turning typo tolerance off for part numbers only, per attribute, worked on the first build. It made every part number added afterwards unfindable on Meilisearch 1.12.8. The sync test `test_a_part_added_after_the_build_is_found_by_its_number` caught it (commit 652e08a). Typo tolerance is now off for the whole index. That also costs typo tolerance on description words.
+- **Rows re read after a gap.** A paged source whose page 2 fails keeps its checkpoint at the gap. The pages after it are read again on the next run. A row is unchanged only when it equals the newest stored version of its part (a key that exists proves nothing about that). The generated tests in `tests/test_output_round_3.py` pin it. They cover price sequences, partial runs and killed runs of the file, REST, SOAP and scraper readers, beside `test_rereading_rows_after_a_gap_does_not_store_a_row_twice`.
+- **A mutation harness that edited nothing.** Two guards that span several lines in files with CRLF line endings were never edited. Their mutants were reported as survivors that were not real. The harness now matches on LF text. It refuses to report a mutation that changed nothing. <!-- NEG-OK: bug story -->
+- **A search that missed a quarter of the numbers a supplier prints.** A reviewer who had not seen the code sampled 400 supplier-written numbers. They came from the generator's truth file. 125 found nothing on either backend. The query was normalised with no brand, so `DU-ZR7208` kept its prefix and a Kestrel number lost its real leading zero. A query is now tried in every form a supplier might print (as typed, with no brand, with each brand's rules), against both backends through one function. The same 400 give 0 misses on both.
+- **A guard that did nothing.** One mutant survived. The guard it removed was redundant with the line after it (`indexed_version` is set to the version that was sent, so a part edited mid send stays behind anyway). The dead condition was removed and a mutant for the real defect was added.
 
 ## Run it
 
@@ -79,7 +83,7 @@ python manage.py migrate
 python manage.py run_demo                  # generate, ingest, match, fitment, plans, index, then again (the saved 20,000 part run shows about 25 s of stages plus the index)
 ```
 
-`run_demo` needs an empty database and prints every stage with its timing, ending (without `--brief`) in a summary that matches the first table above. Windows 11 is the setup it was run on; the macOS and Linux activate line is the standard equivalent.
+`run_demo` needs an empty database. It prints every stage with its timing and, without `--brief`, ends in a summary that matches the first table above. Windows 11 is the setup it was run on. The macOS and Linux activate line is the standard equivalent.
 
 Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/parts/search/?q=zr%200014%20p"`.
 
@@ -92,35 +96,21 @@ python tools/mutation_check.py             # 323 guards, about 20 minutes, edits
 
 The database tests use the compose Postgres and create their own `test_camlobe` database. The search tests skip when Meilisearch is down, and the CI workflow starts both.
 
-- 1,023 tests, all passed in a full run by someone else on 2026-10-26 after the third scraper output round ([output](docs/test-runs/2026-10-26-pytest-after-third-round.txt)); that round's six scripts replay as intended ([output](docs/test-runs/2026-10-26-third-pass-replay.txt)). Earlier counts: 954, 686, 597, 442 and 435 ([outputs](docs/test-runs/)).
-- The part number, matching and mapping rules have tests for the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
-- Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures, and the two end states must be identical by content.
-- A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.
-- Mutation harness (`tools/mutation_check.py`, 323 guards, edits source in place so run it in a copy): all 323 were killed in a full run by someone else on 2026-10-26 after the third scraper output round, in 1,037 s ([output](docs/test-runs/2026-10-26-mutation-full-after-third-round.txt)). 93 derive their edit from the syntax tree with `tools/mutate_ast.py` and 230 are text pairs. The history of earlier runs, a survivor that a hand written test now kills, and the two weaker guards: [docs/MUTATION.md](docs/MUTATION.md).
+1,023 tests passed in a full run by someone else on 2026-10-26. All 323 mutation guards were killed in a full run the same day. The run outputs, the earlier counts and the notes on the random worlds, the killed process and the mutation harness are in [docs/tests.md](docs/tests.md).
 
 ## Register: what ran and what did not
 
-| Ran here | Next to try |
-|---|---|
-| Postgres 17 and Meilisearch 1.12.8 in Docker on Windows 11 | a supplier's own feed |
-| an SFTP server (paramiko) running inside the test process | a real SFTP server, key based login |
-| local fake REST and SOAP servers (zeep against a WSDL I wrote) | a real REST API or SOAP service, WS-Security, cursor pagination |
-| sample X12 documents, read back by my own reader | any trading partner, VAN or EDI translator |
-| the data generator's truth file as the oracle for matching | real part numbers, real ACES or VCdb reference data |
-| 200,000 rows on one machine | millions of rows, several workers at once (only the advisory lock is tested) |
-| the CI workflow file | a run of that workflow on GitHub |
-| a local stand-in shop site (login with a CSRF token, expiring session, rate limit, challenge page) and a local forwarding proxy, for the scraper | any real site, a real proxy service, a real bot challenge or web firewall |
-| local Docker Compose stack | Linux and macOS |
+Everything ran on Docker on Windows 11, against stand-ins and generated data. The stand-ins are an SFTP server inside the test process, local fake REST, SOAP and shop sites, and sample X12 documents read by my own reader. The data generator's truth file is the matching oracle. The full table of what ran here and what is next to try is in [docs/register.md](docs/register.md).
 
 ## Limits
 
-- **HTTP scraping is built and was run against a local stand-in shop site and a local forwarding proxy.** A live site's login, markup and limits will differ, as will a proxy service, a CAPTCHA or a web firewall. It checks robots.txt, spaces its requests, honours Retry-After and stops on a block or a challenge without trying to get past it, and a page the site cut short, an empty table or a body shorter than announced ends the run as partial and never as a success, but none of that is permission: use it only on a site whose owner has allowed it, with its terms read ([feeds](docs/feeds.md#scraping-a-site)).
-- **Known limits of the scraper, not fixed:** `rowspan` in a product table; a price cell with two bare whole amounts split by one space and no currency sign (`12 345` reads as one price, `$20 $15` is refused); a body that trickles bytes is bounded per socket read and not in total; and a SOCKS proxy was only tried against a refused connection, never a working one.
-- A delisting rests on one snapshot per supplier: a supplier that sends two full feeds at once (brakes in one file, filters in another) must not be flagged, and a feed that is truncated but reads cleanly is only caught when it would delist more than half the listings (a file cut inside a quote, or short of the header's fields in its last row, is a partial run; a cut that leaves every column of the last row has no signal).
-- A page repeated whole by a paged source is detected, pages that overlap are not. A resumed REST or SOAP run starts at the page of its checkpoint, so it needs the API to keep its order between two runs (the scraper never resumes by position): [feeds](docs/feeds.md#paged-sources).
-- A secret in a URL parameter whose name does not say so (`?k=...`) stays in the stored source name, because hiding every query value would merge two sources into one checkpoint; it is taken out of every message ([feeds](docs/feeds.md#secrets)).
-- Search on the database backend does not fold accents and Meilisearch does.
-- **Known limit, not fixed:** if an index rebuild crashes between the swap and the deletion of the staging index and is then resumed, the old index can be put back live, and the sync cannot repair it (it only sends parts whose version is behind). The cure is `rebuild_search_index --restart`.
+- **HTTP scraping is built and was run against a local stand-in shop site and a local forwarding proxy.** A live site's login, markup and limits will differ. So will a proxy service, a CAPTCHA or a web firewall. It checks robots.txt, spaces its requests, honours Retry-After and stops on a block or a challenge without trying to get past it. A page the site cut short, an empty table or a body shorter than announced ends the run as partial and never as a success. None of that is permission. Use it only on a site whose owner has allowed it, with its terms read ([feeds](docs/feeds.md#scraping-a-site)).
+- **Known limits of the scraper, not fixed.** They are `rowspan` in a product table and a price cell with two bare whole amounts split by one space and no currency sign. `12 345` reads as one price, and `$20 $15` is refused. A body that trickles bytes is bounded per socket read and not in total. A SOCKS proxy was only tried against a refused connection, never a working one.
+- A delisting rests on one snapshot per supplier. A supplier that sends two full feeds at once (brakes in one file, filters in another) must not be flagged. A feed that is truncated but reads cleanly is only caught when it would delist more than half the listings. A file cut inside a quote, or short of the header's fields in its last row, is a partial run. A cut that leaves every column of the last row has no signal.
+- A page repeated whole by a paged source is detected. Pages that overlap are not. A resumed REST or SOAP run starts at the page of its checkpoint. It needs the API to keep its order between two runs (the scraper never resumes by position): [feeds](docs/feeds.md#paged-sources).
+- A secret in a URL parameter whose name does not say so (`?k=...`) stays in the stored source name. Hiding every query value would merge two sources into one checkpoint. It is taken out of every message ([feeds](docs/feeds.md#secrets)).
+- Search on the database backend does not fold accents. Meilisearch does.
+- **Known limit, not fixed.** An index rebuild can crash between the swap and the deletion of the staging index. If it is then resumed, the old index can be put back live. The sync cannot repair it, because it only sends parts whose version is behind. The cure is `rebuild_search_index --restart`.
 - Fitment is a small sample table in ACES style (year, make, model, submodel, engine, position). It is not the VCdb.
 - The brands, aliases, prefixes and zero rules are generated for the sample. The structure is realistic, the content is not any manufacturer's.
 - The part number rules remove every dot and slash, which loses information in a catalog where those are meaningful. A change to the rules does not re match old rows.
