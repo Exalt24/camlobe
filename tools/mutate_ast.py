@@ -390,7 +390,7 @@ def main(argv=None):
     ap.add_argument("--test", required=True)
     ap.add_argument("--max", type=int, default=40)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--jobs", type=int, default=max(2, (os.cpu_count() or 4) // 2))
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--min-score", type=float, default=0.0)
     ap.add_argument("--list", action="store_true")
