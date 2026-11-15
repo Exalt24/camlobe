@@ -38,10 +38,20 @@ jobs:
           MEILI_NO_ANALYTICS: "true"
         ports:
           - 7700:7700
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
     env:
       CAMLOBE_DB_HOST: localhost
       CAMLOBE_DB_PORT: "5432"
       CAMLOBE_MEILI_URL: http://localhost:7700
+      CAMLOBE_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0

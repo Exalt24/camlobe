@@ -48,6 +48,7 @@ flowchart LR
 | Match | `match_parts` | the same brand and number across suppliers is one part; a row with no brand or with a conflicting barcode goes to a review queue instead of being merged ([rule](docs/matching.md)) |
 | Index | `rebuild_search_index`, `sync_search_index` | the rebuild resumes and swaps in at the end; the sync sends only parts that changed |
 | Serve | `runserver` | search, part detail with sources and fitment, vehicle fitment, run status ([API](docs/api.md)) |
+| Background | `celery -A config worker`, `celery -A config beat` | a feed run is a Celery task on Redis: a worker that loses the Postgres lock steps aside, a dropped connection is retried with backoff and a bad file is not, and a run resumes at its checkpoint ([background runs](docs/background.md)) |
 | Orders | `edi_po`, `edi_parse` | an X12 850 built from a supplier's own part numbers, and readers for 855, 856 and 810 ([EDI](docs/edi.md)) |
 
 Feed adapters sit behind one interface: [feeds](docs/feeds.md). They are a local file, SFTP, paged REST with rate limit and retry, SOAP, and an HTTP scraper for a site with a login. The scraper was tested against a local fake site only: see Limits.
@@ -76,7 +77,7 @@ Windows 11 desktop, Docker Postgres 17 on localhost, one process. Counts and tim
 No account or key is needed. Docker, Python 3.13 and Git Bash on Windows 11 are what it was run with.
 
 ```bash
-docker compose up -d --wait                # Postgres 17 on 5434, Meilisearch on 7701, waits until both are healthy
+docker compose up -d --wait                # Postgres 17 on 5434, Meilisearch on 7701, Redis on 6381, waits until all three are healthy
 python -m venv .venv && . .venv/Scripts/activate    # macOS or Linux: . .venv/bin/activate
 pip install -r requirements-dev.txt
 python manage.py migrate
@@ -85,12 +86,16 @@ python manage.py run_demo                  # generate, ingest, match, fitment, p
 
 `run_demo` needs an empty database. It prints every stage with its timing and, without `--brief`, ends in a summary that matches the first table above. Windows 11 is the setup it was run on. The macOS and Linux activate line is the standard equivalent.
 
-Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/parts/search/?q=zr%200014%20p"`.
+Then `python manage.py runserver` and, for example, `curl "localhost:8000/api/parts/search/?q=zr%200014%20p"`. The feed runs table is at `localhost:8000/runs/`: an AG Grid page over `/api/feed-runs/`, sortable and filterable, refreshing every few seconds while a run is going.
+
+![The feed runs page: four runs in AG Grid, three succeeded and one failed on a renamed column, each with its read, written, unchanged and rejected counts](docs/feed-runs-grid.png)
+
+*A screenshot of the real page against the local database after four runs of the sample feeds.*
 
 ## Tests
 
 ```bash
-python -m pytest tests/ -o addopts=""      # 1,025 tests (1,023 in the last full run, two link guard tests came after), about 8 minutes, needs Postgres on 5434 and Meilisearch on 7701
+python -m pytest tests/ -o addopts=""      # 1,025 tests (1,023 in the last full run, two link guard tests came after), about 8 minutes, needs Postgres on 5434, Meilisearch on 7701 and, for one test that starts a real worker, Redis on 6381
 python tools/mutation_check.py             # 323 guards, about 20 minutes, edits source in place: run it in a copy (--help)
 ```
 
@@ -123,7 +128,7 @@ Everything ran on Docker on Windows 11, against stand-ins and generated data. Th
 
 ## Stack
 
-Python 3.13, Django 5.2, Django REST framework, PostgreSQL 17, Meilisearch, paramiko, zeep, requests with SOCKS support, defusedxml, beautifulsoup4 with lxml, pytest and Hypothesis, Docker Compose, GitHub Actions.
+Python 3.13, Django 5.2, Django REST framework, PostgreSQL 17, Meilisearch, Celery with Redis, AG Grid Community, paramiko, zeep, requests with SOCKS support, defusedxml, beautifulsoup4 with lxml, pytest and Hypothesis, Docker Compose, GitHub Actions.
 
 ## License
 

@@ -1,3 +1,4 @@
+import json
 """Settings for the local lab. Every value that differs between machines comes from the environment."""
 import os
 from pathlib import Path
@@ -58,3 +59,15 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "loggers": {"catalog": {"handlers": ["console"], "level": "WARNING"}},
 }
+
+# Background work (Celery on Redis). A feed run is long and must not die with a web request.
+CELERY_BROKER_URL = os.environ.get("CAMLOBE_REDIS_URL", "redis://localhost:6381/0")
+CELERY_RESULT_BACKEND = os.environ.get("CAMLOBE_REDIS_URL", "redis://localhost:6381/0")
+CELERY_TASK_ACKS_LATE = True            # a worker that dies mid run hands the job back to the broker
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1   # one long feed per worker slot, not a queue of them
+CELERY_TASK_SOFT_TIME_LIMIT = 60 * 50
+CELERY_TASK_TIME_LIMIT = 60 * 60
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# {"<name>": {"supplier": "<code>", "source": {"file": "<path>"}, "crontab": "0 3 * * *"}}: set from the environment as JSON.
+CAMLOBE_FEED_SCHEDULE = json.loads(os.environ.get("CAMLOBE_FEED_SCHEDULE", "{}"))

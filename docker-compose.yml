@@ -20,3 +20,12 @@ services:
       MEILI_NO_ANALYTICS: "true"
     ports:
       - "7701:7700"   # deliberately not 7700
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6381:6379"   # deliberately not 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
