@@ -60,6 +60,7 @@ from .paged import FatalError
 from .redact import identity_url, query_values, userinfo_secrets
 from .rest import _retry_after
 from .transport import CONFIG_CODE, CONFIG_PHRASE, classify
+from .urlnorm import canonical_url
 
 DEFAULT_USER_AGENT = "camlobe-feed/1.0 (supplier catalog ingest)"
 DEFAULT_CHALLENGE_MARKERS = (
@@ -268,7 +269,7 @@ def _scan(text: str) -> tuple[bool, bool]:
 
 
 def _origin(url: str) -> tuple[str, str]:
-    parts = urlsplit(url)
+    parts = urlsplit(canonical_url(url))  # a default port, capitals in the host or an empty query do not make another site
     return parts.scheme, parts.netloc.lower()
 
 
@@ -387,17 +388,17 @@ class ScrapeAdapter:
             self._read_robots()
         url, seen, pages = urldefrag(self.cfg.start_url)[0], set(), 0  # a fragment is never sent and never tells two pages apart
         while url:
-            if url in seen:
+            if canonical_url(url) in seen:  # compared by canonical_url: a tracking parameter, a query in another order or a default port is the same page
                 raise _Stop("E_PAGE_LOOP", "a next link leads back to a page already read")
             if pages >= self.cfg.max_pages:
                 raise _Stop("E_TOO_MANY_PAGES", f"more than {self.cfg.max_pages} pages")
-            seen.add(url)
+            seen.add(canonical_url(url))
             page = self._page(url)
             served = urldefrag(page.url)[0]  # where a redirect landed: the base of the page's links, and a second name for it
-            if served != url:
-                if served in seen:
+            if canonical_url(served) != canonical_url(url):
+                if canonical_url(served) in seen:
                     raise _Stop("E_PAGE_LOOP", "a next link leads back to a page already read")
-                seen.add(served)
+                seen.add(canonical_url(served))
             pages += 1
             self._data_pages += 1
             self._stats["pages"] += 1
@@ -435,8 +436,8 @@ class ScrapeAdapter:
         if not href or href.startswith("#") or href.lower().startswith("javascript:") or self._says_disabled(link):
             return ""
         target = urldefrag(urljoin(self._document_base(soup, current), href))[0]
-        itself = {urldefrag(current)[0]} | ({urldefrag(asked)[0]} if asked else set())  # the page has two names after a redirect
-        return "" if target in itself else target
+        itself = {canonical_url(current)} | ({canonical_url(asked)} if asked else set())  # the page has two names after a redirect
+        return "" if canonical_url(target) in itself else target
 
     @staticmethod
     def _document_base(soup: BeautifulSoup, served: str) -> str:

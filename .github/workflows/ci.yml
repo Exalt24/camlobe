@@ -67,5 +67,11 @@ jobs:
           python manage.py makemigrations --check --dry-run
       - name: Every mutation guard still finds its text
         run: python tools/mutation_check.py --check-targets
+      - name: Rust normaliser builds and passes its own tests
+        run: |
+          cargo build --release --locked --manifest-path normalizer-rs/Cargo.toml
+          cargo test --locked --manifest-path normalizer-rs/Cargo.toml
       - name: Tests
+        env:
+          CAMLOBE_REQUIRE_RUST: "1"
         run: python -m pytest tests/ -q

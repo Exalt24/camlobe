@@ -672,6 +672,41 @@ def test_the_walk_notices_a_loop_through_a_redirect_by_either_name_of_the_first_
     assert codes(out) == ["E_PAGE_LOOP"] and len(rows(out)) == 2  # the first page is not read a second time
 
 
+@pytest.mark.parametrize("back", ["/parts?utm_source=mail&sort=asc", "/parts?sort=asc&gclid=1#top", "HTTP://SHOP.TEST:80/parts?sort=asc"])
+def test_a_loop_back_to_the_first_page_under_another_spelling_of_its_address_is_still_a_loop(back):
+    """The pager copies a campaign tag, reorders its query or writes the host in capitals: the same page, so the walk stops."""
+
+    def route(url):
+        path = url.replace(BASE, "")
+        if path == "/parts?sort=asc":
+            return 200, {}, products_table([part(1)], nxt='<a rel="next" href="/parts/two">Next</a>')
+        if path == "/parts/two":
+            return 200, {}, products_table([part(2)], nxt=f'<a rel="next" href="{back}">Next</a>')
+        return 404, {}, ""
+
+    out = records(adapter_for(route, start_url=f"{BASE}/parts?sort=asc"))
+    assert codes(out) == ["E_PAGE_LOOP"] and len(rows(out)) == 2  # the first page is not read a second time
+
+
+def test_a_next_link_that_only_adds_a_tracking_tag_to_the_page_itself_is_no_next_page():
+    def route(url):
+        return 200, {}, products_table([part(1), part(2)], nxt='<a rel="next" href="/parts?sort=asc&utm_campaign=autumn">Next</a>')
+
+    out = records(adapter_for(route, start_url=f"{BASE}/parts?sort=asc"))
+    assert codes(out) == [] and len(rows(out)) == 2
+
+
+def test_a_next_link_that_differs_in_a_real_parameter_is_a_page_and_is_read():
+    def route(url):
+        path = url.replace(BASE, "")
+        if path == "/parts?sort=asc":
+            return 200, {}, products_table([part(1)], nxt='<a rel="next" href="/parts?sort=desc">Next</a>')
+        return 200, {}, products_table([part(2)])
+
+    out = records(adapter_for(route, start_url=f"{BASE}/parts?sort=asc"))
+    assert codes(out) == [] and len(rows(out)) == 2
+
+
 def test_a_redirect_that_lands_on_another_site_is_still_refused_and_a_next_link_there_too():
     def route(url):
         return 301, {"Location": "http://other.test/parts/"}, ""

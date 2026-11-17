@@ -79,6 +79,7 @@ TARGETS = {
     "orders": ROOT / "catalog" / "edi" / "orders.py",
     "snapshot": ROOT / "catalog" / "snapshot.py",
     "scrape": ROOT / "catalog" / "ingest" / "scrape.py",
+    "urlnorm": ROOT / "catalog" / "ingest" / "urlnorm.py",
     "redact": ROOT / "catalog" / "ingest" / "redact.py",
     "transport": ROOT / "catalog" / "ingest" / "transport.py",
     "requirements": ROOT / "requirements.txt",
@@ -169,6 +170,8 @@ TRUTH = "tests/test_pipeline_truth.py"
 FORMS = "tests/test_search_forms.py"
 DELIST = "tests/test_delisting.py"
 SCRAPE = "tests/test_scrape.py"
+URLNORM = "tests/test_urlnorm.py"
+SCRAPE_PAGES = "tests/test_scrape_pages.py"
 SECRETS = "tests/test_secrets_not_stored.py"
 PAGES = "tests/test_scrape_pages.py"
 R3 = "tests/test_output_round_3.py"
@@ -422,7 +425,7 @@ MUTANTS: list[Mutant] = [
     M("scrape: a page with no table is read", "scrape", '        if table is None:\n            raise _Stop("E_UNEXPECTED_PAGE"', '        if False:\n            raise _Stop("E_UNEXPECTED_PAGE"', SCRAPE),
     M("scrape: a redirect to another site is followed", "scrape", '                if _origin(target) != _origin(self.cfg.start_url):\n                    raise _Stop("E_OFFSITE", "the site redirected', '                if False:\n                    raise _Stop("E_OFFSITE", "the site redirected', SCRAPE),
     M("scrape: a next link to another site is followed", "scrape", "            if url and _origin(url) != _origin(self.cfg.start_url):", "            if False:", SCRAPE),
-    M("scrape: a next link that loops is followed for ever", "scrape", "            if url in seen:\n", "            if False:\n", SCRAPE, timeout=60),
+    M("scrape: a next link that loops is followed for ever", "scrape", "            if canonical_url(url) in seen:", "            if False:", SCRAPE, timeout=60),
     D("scrape: there is no page limit", "scrape", "_walk", "negate the condition", "if pages >= self.cfg.max_pages", SCRAPE),
     M("scrape: a dead proxy is asked again every time", "scrape", "                self._dead.add(index)  # this proxy refused or dropped the connection: the next one carries the request\n", "", SCRAPE),
     M("scrape: a proxy that fails ends the request", "scrape", '                self._stats["proxy_failovers"] += 1\n                continue\n', '                raise _Transient("E_PROXY_UNAVAILABLE", "x")\n', SCRAPE),
@@ -458,7 +461,7 @@ MUTANTS: list[Mutant] = [
     D("scrape: a latin-1 page with an undefined windows-1252 byte is refused", "scrape", "decode_page", "negate the condition", "if codec in _LATIN_ONE:", PAGES),
     # ---- a next link that is not a page is the end of the walk ------------------------------------------------------------------------------
     D("scrape: an empty, # or javascript: next link is followed", "scrape", "_next_url", "negate the condition", "if not href", PAGES),
-    D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if target in itself', PAGES),
+    D("scrape: a next link to the page itself is followed", "scrape", "_next_url", "negate the condition", 'return "" if canonical_url(target) in itself', PAGES),
     D("scrape: a next link marked disabled is followed", "scrape", "_says_disabled", "and <-> or", 'any("disabled"', PAGES),
     # ---- the same class in the REST adapter: a JSON answer is read as bytes ------------------------------------------------------------------
     D("rest: the answer is not read as JSON bytes", "rest", "_json_body", "return value", "json.loads", REMOTE),
@@ -476,9 +479,9 @@ MUTANTS: list[Mutant] = [
     D("transport: a body cut after the headers is not E_PAGE_TRUNCATED", "transport", "classify", "negate the condition", "rx.ChunkedEncodingError", PAGES),
     D("transport: a body that does not decode is not E_PAGE_ENCODING", "transport", "classify", "negate the condition", "rx.ContentDecodingError", PAGES),
     # F4: a link is resolved against the address the page was served from, or its base element
-    D("scrape: a redirect's landing address is not told from the one asked for", "scrape", "_walk", "negate the condition", "if served != url", PAGES),
-    D("scrape: a page read under its second address is read again", "scrape", "_walk", "delete the call statement", "seen.add(served)", PAGES),
-    D("scrape: a next link back to the page served is followed", "scrape", "_next_url", "In -> NotIn", 'return "" if target in itself', PAGES),
+    D("scrape: a redirect's landing address is not told from the one asked for", "scrape", "_walk", "negate the condition", "if canonical_url(served) != canonical_url(url)", PAGES),
+    D("scrape: a page read under its second address is read again", "scrape", "_walk", "delete the call statement", "seen.add(canonical_url(served))", PAGES),
+    D("scrape: a next link back to the page served is followed", "scrape", "_next_url", "In -> NotIn", 'return "" if canonical_url(target) in itself', PAGES),
     D("scrape: a base element is not the base of a link", "scrape", "_document_base", "negate the condition", "if base_tag is not None", PAGES),
     D("scrape: the action of the login form is not read", "scrape", "_login", "and <-> or", "action = urljoin", PAGES),
     # F5, F6, F7: the table's own rows and cells, a th in a body row, a spanned cell, a second header row
@@ -531,6 +534,16 @@ MUTANTS: list[Mutant] = [
     D("scrape: a heading spanning less than the whole width counts as a group heading", "scrape", "_table", "GtE -> Lt", "_span(own_cells[0]) >= len(header)", R3),
     D("scrape: a one column table has group headings", "scrape", "_table", "Gt -> LtE", "len(header) > 1", R3),
     D("scrape: a skipped heading row is not counted", "scrape", "_table", "delete the call statement", 'skip("heading_row")', R3),
+    M("urlnorm: a default port stays in the name", "urlnorm", "netloc = host if port in (None, DEFAULT_PORTS[scheme]) else f\"{host}:{port}\"", "netloc = host if port is None else f\"{host}:{port}\"", URLNORM),
+    M("urlnorm: the query keeps the order it came in", "urlnorm", "    pairs.sort()\n", "    pass\n", URLNORM),
+    M("urlnorm: a tracking parameter names a page", "urlnorm", "        if is_tracking(name):\n            continue\n", "", URLNORM),
+    M("urlnorm: dot segments stay in the path", "urlnorm", "path = _escapes(_dot_segments(parts.path or \"/\"))", "path = _escapes(parts.path or \"/\")", URLNORM),
+    M("urlnorm: a percent escape keeps its case", "urlnorm", 'return char if char in UNRESERVED else "%" + match.group(1).upper()', 'return char if char in UNRESERVED else "%" + match.group(1)', URLNORM),
+    M("urlnorm: an escaped letter stays escaped", "urlnorm", 'return char if char in UNRESERVED else "%" + match.group(1).upper()', 'return "%" + match.group(1).upper()', URLNORM),
+    M("urlnorm: a tracking name is matched by its prefix only", "urlnorm", "return lowered.startswith(TRACKING_PREFIX) or lowered in TRACKING_NAMES", "return lowered.startswith(TRACKING_PREFIX)", URLNORM),
+    M("scrape: the origin of a link keeps its default port", "scrape", "parts = urlsplit(canonical_url(url))  # a default port", "parts = urlsplit(url)  # a default port", SCRAPE_PAGES),
+    M("scrape: the walk remembers pages by their raw address", "scrape", "            seen.add(canonical_url(url))\n", "            seen.add(url)\n", SCRAPE_PAGES),
+    M("scrape: a next link that only adds a tracking tag is read as a page", "scrape", 'return "" if canonical_url(target) in itself else target', 'return "" if target in itself else target', SCRAPE_PAGES, timeout=60),
     # F5: the text of an XML field is the whole text of its element (the text after a child tag, a br as a space, a plain element as it was)
     D("adapters: the text after a child tag of an XML field is dropped", "adapters", "element_text", "delete the call statement", "parts.append(child.tail", R3),
     D("adapters: a br in an XML field is not a break", "adapters", "element_text", "Eq -> NotEq", '.lower() == "br"', R3),

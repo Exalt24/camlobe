@@ -10,7 +10,7 @@
 
 A Django and PostgreSQL pipeline that ingests auto parts catalogs from several suppliers' feeds and matches the same part across them without guessing.
 
-It normalises part numbers first, and serves the result through REST and a Meilisearch index.
+It normalises part numbers first, and serves the result through REST and a Meilisearch index. The normaliser also exists as a Rust port that is checked against the Python on every code point ([the port](docs/normalization.md#the-rust-port)), and the scraper compares pages by a canonical address ([page addresses](docs/normalization.md#page-addresses)).
 
 On 20,000 generated parts, 40,008 stored feed rows from three suppliers became 19,098 parts. 14,106 of them are listed by two or more suppliers. A second pass wrote nothing new. Five sources are skipped on a matching content hash, and the row level case is tested ([run output](docs/test-runs/2026-10-25-run-demo-20k.txt)). At 2,500 parts a test (`tests/test_pipeline_truth.py`) finds no part merged wrongly or split against the generator's own truth file. The 20,000 part run reports counts only.
 

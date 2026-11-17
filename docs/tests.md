@@ -1,6 +1,7 @@
 # Tests
 
 - 1,023 tests, all passed in a full run by someone else on 2026-10-26 after the third scraper output round ([output](test-runs/2026-10-26-pytest-after-third-round.txt)). That round's six scripts replay as intended ([output](test-runs/2026-10-26-third-pass-replay.txt)). Earlier counts: 954, 686, 597, 442 and 435 ([outputs](test-runs/)).
+- `tests/test_normalize_rust.py` runs the Rust port of the part number normaliser against the Python one on generated and structured inputs and on every code point (about 15 seconds); `tests/test_urlnorm.py` covers the page address rules ([details](normalization.md#the-rust-port)). CI builds the Rust binary first and sets `CAMLOBE_REQUIRE_RUST` so a missing build fails instead of skipping.
 - The part number, matching and mapping rules have tests for the case that must match and the near miss that must not. Part numbers and the X12 reader also have Hypothesis properties.
 - Seeded random worlds (`tests/test_pipeline_simulation.py`): 24 worlds are run clean and again with injected failures. The two end states must be identical by content.
 - A real process is killed mid ingest (`test_a_process_killed_mid_run_leaves_a_consistent_checkpoint_and_the_rerun_finishes`) and the rerun finishes the file.

@@ -1,0 +1,6 @@
+python 200000 numbers in 1.375 s (1090000 characters kept)
+rust   200000 numbers in 313.1613ms (1090000 characters kept)
+python 200000 numbers in 1.376 s (1090000 characters kept)
+rust   200000 numbers in 310.6349ms (1090000 characters kept)
+
+Intel Core i5-11400H laptop, Windows 11, python 3.13.10, rustc release build (cargo 1.90), one process, the function only. Command: python tools/bench_normalizer.py 200000 (run twice).
