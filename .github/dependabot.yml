@@ -19,3 +19,12 @@ updates:
       actions:
         patterns: ["*"]
         update-types: [minor, patch]
+  - package-ecosystem: cargo
+    directory: "/normalizer-rs"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
